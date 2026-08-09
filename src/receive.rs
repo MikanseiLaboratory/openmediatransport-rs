@@ -221,7 +221,17 @@ impl Receiver {
                     )?));
                 }
                 Ok(None) => {
-                    // Timeout / would-block / incomplete frame — keep waiting until deadline.
+                    self.av_stream = None;
+                    self.meta_stream = None;
+                    self.subscribed = false;
+                    return Ok(None);
+                }
+                Err(OmtError::Io(ref e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
                     if deadline.is_none() {
                         continue;
                     }

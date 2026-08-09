@@ -67,7 +67,13 @@ impl Channel {
                 ) => {}
             Err(e) => return Err(e.into()),
         }
-        self.try_pop_frame()
+        match self.try_pop_frame()? {
+            Some(frame) => Ok(Some(frame)),
+            None => Err(OmtError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "incomplete OMT frame",
+            ))),
+        }
     }
 
     /// Push bytes into the reassembly buffer (for testing / async adapters).
