@@ -277,7 +277,10 @@ pub(crate) fn try_recv_metadata(
             Err(e) => return Err(e),
         }
     }
-    Ok(None)
+    Err(OmtError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "metadata receive timed out",
+    )))
 }
 
 /// Build a metadata frame bytes for an address XML.
