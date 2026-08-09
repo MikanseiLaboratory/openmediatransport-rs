@@ -14,7 +14,7 @@ use crate::discovery::server::{address_frame_bytes, try_recv_metadata};
 use crate::error::OmtError;
 use crate::transport::channel::Channel;
 use crate::transport::socket::configure_stream;
-use crate::types::{FrameType, DISCOVERY_SERVER_DEFAULT_PORT, URL_PREFIX};
+use crate::types::{DISCOVERY_SERVER_DEFAULT_PORT, FrameType, URL_PREFIX};
 
 /// Client that registers sources with a discovery server.
 #[derive(Debug)]
@@ -77,21 +77,21 @@ impl DiscoveryClient {
             while !*stop.lock().unwrap() {
                 match try_recv_metadata(&mut stream, &mut channel, Duration::from_millis(200)) {
                     Ok(Some(xml)) => {
-                        if let Ok(addr) = OmtAddress::from_xml(&xml) {
-                            if let Ok(mut g) = sources.lock() {
-                                if addr.removed {
-                                    g.retain(|a| {
-                                        !(a.instance_name() == addr.instance_name()
-                                            && a.port == addr.port)
-                                    });
-                                } else {
-                                    g.retain(|a| {
-                                        !(a.instance_name() == addr.instance_name()
-                                            && a.port == addr.port)
-                                    });
-                                    g.push(addr);
-                                    g.sort_by(|a, b| a.instance_name().cmp(&b.instance_name()));
-                                }
+                        if let Ok(addr) = OmtAddress::from_xml(&xml)
+                            && let Ok(mut g) = sources.lock()
+                        {
+                            if addr.removed {
+                                g.retain(|a| {
+                                    !(a.instance_name() == addr.instance_name()
+                                        && a.port == addr.port)
+                                });
+                            } else {
+                                g.retain(|a| {
+                                    !(a.instance_name() == addr.instance_name()
+                                        && a.port == addr.port)
+                                });
+                                g.push(addr);
+                                g.sort_by_key(|a| a.instance_name());
                             }
                         }
                     }
@@ -150,9 +150,9 @@ fn parse_server_url(url: &str) -> Result<(String, u16), OmtError> {
     };
     let rest = rest.split('/').next().unwrap_or(rest);
     if let Some((host, port)) = rest.rsplit_once(':') {
-        let port: u16 = port
-            .parse()
-            .map_err(|_| OmtError::InvalidArgument(format!("invalid discovery server port: {port}")))?;
+        let port: u16 = port.parse().map_err(|_| {
+            OmtError::InvalidArgument(format!("invalid discovery server port: {port}"))
+        })?;
         Ok((host.to_string(), port))
     } else {
         Ok((rest.to_string(), DISCOVERY_SERVER_DEFAULT_PORT))

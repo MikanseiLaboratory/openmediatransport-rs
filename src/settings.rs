@@ -1,4 +1,5 @@
 //! Persistent settings (XML under `OMT_STORAGE_PATH`).
+#![allow(dead_code)]
 
 use std::env;
 use std::fs;

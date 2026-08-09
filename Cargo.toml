@@ -26,6 +26,7 @@ vmx = { path = "../vmx-rs" }
 tokio = { version = "1", optional = true, features = ["net", "rt", "rt-multi-thread", "sync", "time", "macros", "io-util"] }
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [[example]]
 name = "discovery"
@@ -36,3 +37,6 @@ name = "send_receive"
 [[example]]
 name = "send_receive_tokio"
 required-features = ["tokio"]
+
+[[example]]
+name = "receive_to_jpeg"

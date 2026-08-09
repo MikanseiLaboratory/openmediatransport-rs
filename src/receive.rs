@@ -9,8 +9,8 @@ use crate::discovery::address::OmtAddress;
 use crate::error::OmtError;
 use crate::protocol::frame::{AssembledFrame, FrameHeader, PROTOCOL_VERSION};
 use crate::protocol::metadata::{
-    encode_metadata_xml, suggested_quality_xml, SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA,
-    SUBSCRIBE_VIDEO,
+    SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO, encode_metadata_xml,
+    suggested_quality_xml,
 };
 use crate::transport::channel::Channel;
 use crate::transport::socket::connect;
@@ -31,6 +31,7 @@ pub struct Receiver {
     av_stream: Option<TcpStream>,
     meta_stream: Option<TcpStream>,
     av_channel: Channel,
+    #[allow(dead_code)]
     meta_channel: Channel,
     subscribed: bool,
 }
@@ -40,7 +41,9 @@ impl Receiver {
     pub fn create(address: impl Into<String>, frame_types: FrameType) -> Result<Self, OmtError> {
         let address = address.into();
         if address.is_empty() {
-            return Err(OmtError::InvalidArgument("receiver address is empty".into()));
+            return Err(OmtError::InvalidArgument(
+                "receiver address is empty".into(),
+            ));
         }
         let parsed = OmtAddress::from_url(&address)?;
         Ok(Self {
@@ -108,10 +111,30 @@ impl Receiver {
             .parse()
             .map_err(|e| OmtError::InvalidArgument(format!("bad address: {e}")))?;
 
-        let av = connect(addr, timeout)?;
-        let meta = connect(addr, timeout)?;
-        self.av_stream = Some(av);
-        self.meta_stream = Some(meta);
+        // libomtnet: one TCP for video/metadata, a second only for audio.
+        let want_video_or_meta = self.frame_types.contains(FrameType::VIDEO)
+            || self.frame_types.contains(FrameType::METADATA)
+            || self.frame_types == FrameType::NONE;
+        let want_audio = self.frame_types.contains(FrameType::AUDIO);
+
+        if want_video_or_meta {
+            let av = connect(addr, timeout)?;
+            self.av_stream = Some(av);
+        }
+        if want_audio {
+            // Audio uses the metadata stream slot when video is also present;
+            // for audio-only, use av_stream as the audio channel.
+            if self.av_stream.is_some() {
+                let meta = connect(addr, timeout)?;
+                self.meta_stream = Some(meta);
+            } else {
+                let av = connect(addr, timeout)?;
+                self.av_stream = Some(av);
+            }
+        }
+        // Keep a second connection for metadata-only quality/tally side-channel
+        // when video is requested without audio (matches historical dual-socket scaffold).
+        // Prefer libomtnet behavior: everything on the video socket.
         self.send_subscriptions()?;
         self.subscribed = true;
         Ok(())
@@ -119,19 +142,34 @@ impl Receiver {
 
     fn send_subscriptions(&mut self) -> Result<(), OmtError> {
         let quality_xml = suggested_quality_xml(self.suggested_quality);
-        if let Some(stream) = self.meta_stream.as_mut() {
-            if self.frame_types.contains(FrameType::METADATA) {
+        // libomtnet OMTReceive ConnectionCompleted(Video):
+        //   SUBSCRIBE_METADATA, [PREVIEW], SUBSCRIBE_VIDEO, suggested quality, tally
+        // all on the video socket.
+        if let Some(stream) = self.av_stream.as_mut() {
+            if self.frame_types.contains(FrameType::VIDEO)
+                || self.frame_types.contains(FrameType::METADATA)
+            {
                 write_metadata_frame(stream, SUBSCRIBE_METADATA)?;
             }
-            write_metadata_frame(stream, &quality_xml)?;
-        }
-        if let Some(stream) = self.av_stream.as_mut() {
+            if self.flags.contains(ReceiveFlags::PREVIEW) {
+                write_metadata_frame(stream, crate::protocol::metadata::PREVIEW_ON)?;
+            }
             if self.frame_types.contains(FrameType::VIDEO) {
                 write_metadata_frame(stream, SUBSCRIBE_VIDEO)?;
+                write_metadata_frame(stream, &quality_xml)?;
             }
-            if self.frame_types.contains(FrameType::AUDIO) {
+            // Audio-only uses this same socket.
+            if self.frame_types.contains(FrameType::AUDIO) && self.meta_stream.is_none() {
                 write_metadata_frame(stream, SUBSCRIBE_AUDIO)?;
             }
+            stream.flush()?;
+        }
+        // Separate audio socket (libomtnet audio connection).
+        if let Some(stream) = self.meta_stream.as_mut()
+            && self.frame_types.contains(FrameType::AUDIO)
+        {
+            write_metadata_frame(stream, SUBSCRIBE_AUDIO)?;
+            stream.flush()?;
         }
         Ok(())
     }
@@ -147,10 +185,31 @@ impl Receiver {
             self.connect(t)?;
         }
 
-        if let Some(stream) = self.av_stream.as_mut() {
-            if timeout_ms >= 0 {
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(timeout_ms as u64)));
+        let deadline = if timeout_ms < 0 {
+            None
+        } else {
+            Some(std::time::Instant::now() + Duration::from_millis(timeout_ms as u64))
+        };
+
+        loop {
+            let Some(stream) = self.av_stream.as_mut() else {
+                return Ok(None);
+            };
+
+            if let Some(deadline) = deadline {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Ok(None);
+                }
+                // Short socket waits so we can reassemble large frames across multiple reads.
+                let slice = remaining
+                    .min(Duration::from_millis(50))
+                    .max(Duration::from_millis(1));
+                let _ = stream.set_read_timeout(Some(slice));
+            } else {
+                let _ = stream.set_read_timeout(None);
             }
+
             match self.av_channel.recv_frame(stream) {
                 Ok(Some(frame)) => {
                     let nbytes = frame.to_bytes().len();
@@ -161,7 +220,15 @@ impl Receiver {
                         self.preferred_format,
                     )?));
                 }
-                Ok(None) => return Ok(None),
+                Ok(None) => {
+                    // Timeout / would-block / incomplete frame — keep waiting until deadline.
+                    if deadline.is_none() {
+                        continue;
+                    }
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return Ok(None);
+                    }
+                }
                 Err(OmtError::Network(_)) | Err(OmtError::Io(_)) => {
                     self.av_stream = None;
                     self.meta_stream = None;
@@ -171,7 +238,6 @@ impl Receiver {
                 Err(e) => return Err(e),
             }
         }
-        Ok(None)
     }
 
     /// Feed raw bytes into the A/V reassembly buffer (tests / custom IO).
@@ -255,9 +321,7 @@ fn decode_received(
             }
             if flags.contains(ReceiveFlags::COMPRESSED_ONLY) {
                 media.data.clear();
-            } else if let Ok(decoded) =
-                try_decode_vmx(&frame.data, v.width, v.height, preferred)
-            {
+            } else if let Ok(decoded) = try_decode_vmx(&frame.data, v.width, v.height, preferred) {
                 media.data = decoded;
                 media.codec = match preferred {
                     PreferredVideoFormat::Bgra => Codec::Bgra.as_i32(),

@@ -1,4 +1,5 @@
 //! Clock / timestamp helpers.
+#![allow(dead_code)]
 //!
 //! OMT timestamps use 100 ns ticks (`10_000_000` = 1 second).
 //! A special value of `-1` asks the sender to generate timestamps automatically.
@@ -70,13 +71,10 @@ impl TimestampClock {
             None => now_timestamp(),
             Some(prev) => {
                 let delta = if sample_rate > 0 && samples_per_channel > 0 {
-                    (samples_per_channel as i64)
-                        .saturating_mul(TICKS_PER_SECOND)
+                    (samples_per_channel as i64).saturating_mul(TICKS_PER_SECOND)
                         / sample_rate as i64
                 } else if frame_rate_n > 0 && frame_rate_d > 0 {
-                    (frame_rate_d as i64)
-                        .saturating_mul(TICKS_PER_SECOND)
-                        / frame_rate_n as i64
+                    (frame_rate_d as i64).saturating_mul(TICKS_PER_SECOND) / frame_rate_n as i64
                 } else {
                     TICKS_PER_SECOND / 60
                 };

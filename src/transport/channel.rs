@@ -10,6 +10,7 @@ use crate::types::{FrameType, NETWORK_RECEIVE_MAX_TRANSFER};
 #[derive(Debug)]
 pub struct Channel {
     /// Primary frame type for this channel (hint).
+    #[allow(dead_code)]
     pub frame_type: FrameType,
     /// Incoming reassembly buffer.
     buf: Vec<u8>,
@@ -25,6 +26,7 @@ impl Channel {
     }
 
     /// Send a fully serialized frame.
+    #[allow(dead_code)]
     pub fn send_bytes<W: Write>(&mut self, writer: &mut W, data: &[u8]) -> Result<(), OmtError> {
         writer.write_all(data)?;
         writer.flush()?;
@@ -32,6 +34,7 @@ impl Channel {
     }
 
     /// Send an assembled frame.
+    #[allow(dead_code)]
     pub fn send_frame<W: Write>(
         &mut self,
         writer: &mut W,
@@ -55,7 +58,13 @@ impl Channel {
                 return Err(OmtError::Network("connection closed mid-frame".into()));
             }
             Ok(n) => self.buf.extend_from_slice(&tmp[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
             Err(e) => return Err(e.into()),
         }
         self.try_pop_frame()
@@ -84,6 +93,7 @@ impl Channel {
     }
 
     /// Bytes currently buffered awaiting a complete frame.
+    #[allow(dead_code)]
     pub fn buffered_len(&self) -> usize {
         self.buf.len()
     }

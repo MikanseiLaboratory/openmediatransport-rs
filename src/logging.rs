@@ -1,4 +1,5 @@
 //! Logging helpers via `tracing`.
+#![allow(dead_code)]
 
 /// Initialize a basic tracing subscriber if none is set (best-effort stub).
 pub fn init_logging() {

@@ -47,12 +47,9 @@ impl Discovery {
         let found = mdns::browse_for(wait)?;
         self.sources = found
             .into_iter()
-            .filter_map(|(fullname, port, addrs)| {
-                OmtAddress::from_dns_sd(fullname, port, addrs)
-            })
+            .filter_map(|(fullname, port, addrs)| OmtAddress::from_dns_sd(fullname, port, addrs))
             .collect();
-        self.sources
-            .sort_by(|a, b| a.instance_name().cmp(&b.instance_name()));
+        self.sources.sort_by_key(|a| a.instance_name());
         Ok(())
     }
 

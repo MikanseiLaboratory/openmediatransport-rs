@@ -125,9 +125,9 @@ impl OmtAddress {
         };
         let (host, port) = match host_port.rsplit_once(':') {
             Some((h, p)) if !h.is_empty() => {
-                let port: u16 = p.parse().map_err(|_| {
-                    OmtError::InvalidArgument(format!("invalid port in URL: {p}"))
-                })?;
+                let port: u16 = p
+                    .parse()
+                    .map_err(|_| OmtError::InvalidArgument(format!("invalid port in URL: {p}")))?;
                 (h, port)
             }
             _ => (host_port, 0),
@@ -150,15 +150,15 @@ impl OmtAddress {
 
     /// Format as `omt://host[:port][/name]`.
     pub fn to_url(&self) -> String {
-        let host = self
-            .addresses
-            .first()
-            .map(String::as_str)
-            .unwrap_or(if self.machine_name.is_empty() {
-                "127.0.0.1"
-            } else {
-                self.machine_name.as_str()
-            });
+        let host =
+            self.addresses
+                .first()
+                .map(String::as_str)
+                .unwrap_or(if self.machine_name.is_empty() {
+                    "127.0.0.1"
+                } else {
+                    self.machine_name.as_str()
+                });
         if self.port == 0 {
             format!("{URL_PREFIX}{host}/{}", self.name)
         } else {
@@ -205,9 +205,8 @@ impl OmtAddress {
 
     /// Parse discovery-server address XML (`OMTAddress.FromXML`).
     pub fn from_xml(xml: &str) -> Result<Self, OmtError> {
-        let name = xml_text(xml, "Name").ok_or_else(|| {
-            OmtError::InvalidArgument("OMTAddress XML missing Name".into())
-        })?;
+        let name = xml_text(xml, "Name")
+            .ok_or_else(|| OmtError::InvalidArgument("OMTAddress XML missing Name".into()))?;
         let port: u16 = xml_text(xml, "Port")
             .ok_or_else(|| OmtError::InvalidArgument("OMTAddress XML missing Port".into()))?
             .parse()
@@ -298,14 +297,13 @@ fn hostname() -> String {
 
 fn local_ips() -> Vec<String> {
     let mut out = vec!["127.0.0.1".to_string()];
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:80").is_ok() {
-            if let Ok(local) = socket.local_addr() {
-                let ip = local.ip().to_string();
-                if ip != "0.0.0.0" && !out.contains(&ip) {
-                    out.insert(0, ip);
-                }
-            }
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
+        && socket.connect("8.8.8.8:80").is_ok()
+        && let Ok(local) = socket.local_addr()
+    {
+        let ip = local.ip().to_string();
+        if ip != "0.0.0.0" && !out.contains(&ip) {
+            out.insert(0, ip);
         }
     }
     out

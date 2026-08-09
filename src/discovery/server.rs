@@ -17,7 +17,7 @@ use crate::protocol::frame::{AssembledFrame, FrameHeader, PROTOCOL_VERSION};
 use crate::protocol::metadata::{decode_metadata_xml, encode_metadata_xml};
 use crate::transport::channel::Channel;
 use crate::transport::socket::{configure_stream, into_listener, listen};
-use crate::types::{FrameType, DISCOVERY_SERVER_DEFAULT_PORT};
+use crate::types::{DISCOVERY_SERVER_DEFAULT_PORT, FrameType};
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -129,10 +129,10 @@ fn peer_loop(
     while !stop.load(Ordering::SeqCst) {
         match channel.recv_frame(&mut stream) {
             Ok(Some(frame)) => {
-                if let Ok(xml) = metadata_xml_from_frame(&frame) {
-                    if let Ok(mut addr) = OmtAddress::from_xml(&xml) {
-                        let _ = handle_address(&shared, peer, &mut addr);
-                    }
+                if let Ok(xml) = metadata_xml_from_frame(&frame)
+                    && let Ok(mut addr) = OmtAddress::from_xml(&xml)
+                {
+                    let _ = handle_address(&shared, peer, &mut addr);
                 }
             }
             Ok(None) => break, // EOF
@@ -157,11 +157,15 @@ fn peer_loop(
             .collect();
         g.entries.retain(|e| e.owner != peer);
         g.peers.remove(&peer);
-        let peers: Vec<TcpStream> = g.peers.values().filter_map(|s| s.try_clone().ok()).collect();
+        let peers: Vec<TcpStream> = g
+            .peers
+            .values()
+            .filter_map(|s| s.try_clone().ok())
+            .collect();
         drop(g);
         for addr in removed {
-            for mut p in &peers {
-                let _ = send_address_to(&mut p, &addr);
+            for p in &peers {
+                let _ = send_address_to(p, &addr);
             }
         }
     }
@@ -185,11 +189,14 @@ fn handle_address(
         if let Some(idx) = existing {
             let mut removed = g.entries.remove(idx).address;
             removed.removed = true;
-            let peers: Vec<TcpStream> =
-                g.peers.values().filter_map(|s| s.try_clone().ok()).collect();
+            let peers: Vec<TcpStream> = g
+                .peers
+                .values()
+                .filter_map(|s| s.try_clone().ok())
+                .collect();
             drop(g);
-            for mut p in peers {
-                let _ = send_address_to(&mut p, &removed);
+            for p in peers {
+                let _ = send_address_to(&p, &removed);
             }
         }
         return Ok(());
@@ -206,11 +213,15 @@ fn handle_address(
             address: addr.clone(),
             owner: peer,
         });
-        let peers: Vec<TcpStream> = g.peers.values().filter_map(|s| s.try_clone().ok()).collect();
+        let peers: Vec<TcpStream> = g
+            .peers
+            .values()
+            .filter_map(|s| s.try_clone().ok())
+            .collect();
         let to_send = addr.clone();
         drop(g);
-        for mut p in peers {
-            let _ = send_address_to(&mut p, &to_send);
+        for p in peers {
+            let _ = send_address_to(&p, &to_send);
         }
     }
     Ok(())
@@ -318,12 +329,16 @@ mod tests {
         let mut found = false;
         while std::time::Instant::now() < deadline {
             let sources = client.sources();
-            if sources.iter().any(|s| s.instance_name() == "TESTHOST (Cam1)" && s.port == 6400)
+            if sources
+                .iter()
+                .any(|s| s.instance_name() == "TESTHOST (Cam1)" && s.port == 6400)
             {
                 found = true;
                 // Server replaces client IPs with peer address (127.0.0.1 here).
                 assert!(sources.iter().any(|s| {
-                    s.addresses.iter().any(|a| a == "127.0.0.1" || a == "::1" || a.starts_with("127."))
+                    s.addresses
+                        .iter()
+                        .any(|a| a == "127.0.0.1" || a == "::1" || a.starts_with("127."))
                 }));
                 break;
             }

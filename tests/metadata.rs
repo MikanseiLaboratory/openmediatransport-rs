@@ -1,15 +1,25 @@
 //! Metadata encode/decode tests.
 
 use openmediatransport::protocol::metadata::{
-    decode_metadata_xml, encode_metadata_xml, tally_xml, SUBSCRIBE_VIDEO, TALLY_NONE,
-    TALLY_PREVIEW, TALLY_PREVIEW_PROGRAM, TALLY_PROGRAM,
+    SUBSCRIBE_VIDEO, TALLY_NONE, TALLY_PREVIEW, TALLY_PREVIEW_PROGRAM, TALLY_PROGRAM,
+    decode_metadata_xml, encode_metadata_xml, tally_xml,
 };
 use openmediatransport::types::Tally;
 
 #[test]
-fn metadata_nul_terminated() {
+fn metadata_roundtrip_matches_libomtnet() {
+    // libomtnet OMTBuffer.FromMetadata does not append a trailing NUL.
     let bytes = encode_metadata_xml(SUBSCRIBE_VIDEO);
-    assert_eq!(*bytes.last().unwrap(), 0);
+    assert_ne!(*bytes.last().unwrap(), 0);
+    assert_eq!(bytes, SUBSCRIBE_VIDEO.as_bytes());
+    let xml = decode_metadata_xml(&bytes).unwrap();
+    assert_eq!(xml, SUBSCRIBE_VIDEO);
+}
+
+#[test]
+fn metadata_with_nul_still_decodes() {
+    let mut bytes = SUBSCRIBE_VIDEO.as_bytes().to_vec();
+    bytes.push(0);
     let xml = decode_metadata_xml(&bytes).unwrap();
     assert_eq!(xml, SUBSCRIBE_VIDEO);
 }

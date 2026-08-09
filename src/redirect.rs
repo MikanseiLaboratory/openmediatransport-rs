@@ -1,4 +1,5 @@
 //! Redirect / proxy helper stub.
+#![allow(dead_code)]
 
 use crate::error::OmtError;
 

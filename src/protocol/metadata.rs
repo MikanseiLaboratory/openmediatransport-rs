@@ -59,14 +59,15 @@ pub fn tally_xml(tally: Tally) -> &'static str {
     }
 }
 
-/// Encode UTF-8 XML metadata with a trailing NUL (as required on the wire).
+/// Encode UTF-8 XML metadata for a metadata-frame Data payload.
+///
+/// Matches libomtnet `OMTBuffer.FromMetadata`: UTF-8 bytes **without** a trailing NUL.
+/// (Per-frame metadata attached to video/audio still uses `MetadataLength` including NUL.)
 pub fn encode_metadata_xml(xml: &str) -> Vec<u8> {
-    let mut out = xml.as_bytes().to_vec();
-    out.push(0);
-    out
+    xml.as_bytes().to_vec()
 }
 
-/// Decode NUL-terminated UTF-8 metadata to a string (NUL stripped).
+/// Decode UTF-8 metadata to a string (trailing NUL stripped if present).
 pub fn decode_metadata_xml(bytes: &[u8]) -> Result<String, crate::error::OmtError> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8(bytes[..end].to_vec())

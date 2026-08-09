@@ -1,21 +1,23 @@
 //! Loopback send/receive integration test.
 
 use openmediatransport::{
-    protocol::metadata::SUBSCRIBE_VIDEO, FrameType, MediaFrame, Receiver, Sender,
+    FrameType, MediaFrame, Receiver, Sender, protocol::metadata::SUBSCRIBE_VIDEO,
 };
 use std::thread;
 use std::time::Duration;
 
 #[test]
 fn metadata_subscribe_and_video_roundtrip() {
-    let mut sender = Sender::create("TestSrc", FrameType::VIDEO | FrameType::METADATA)
-        .expect("sender");
+    let mut sender =
+        Sender::create("TestSrc", FrameType::VIDEO | FrameType::METADATA).expect("sender");
     let port = sender.port();
     assert!((6400..=6600).contains(&port));
 
     let url = format!("omt://127.0.0.1:{port}");
     let mut receiver = Receiver::create(&url, FrameType::VIDEO | FrameType::METADATA).expect("rx");
-    receiver.connect(Some(Duration::from_secs(2))).expect("connect");
+    receiver
+        .connect(Some(Duration::from_secs(2)))
+        .expect("connect");
 
     // Accept both AV + metadata connections and process subscribe
     for _ in 0..100 {
@@ -31,7 +33,7 @@ fn metadata_subscribe_and_video_roundtrip() {
     if !sender.video_subscribed() {
         sender.force_subscribe(true, false, true);
     }
-    assert!(sender.video_subscribed() || true);
+    assert!(sender.video_subscribed());
 
     let payload = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
     let frame = MediaFrame {
@@ -50,11 +52,12 @@ fn metadata_subscribe_and_video_roundtrip() {
 
     let mut got = None;
     for _ in 0..100 {
-        if let Ok(Some(rx)) = receiver.receive(50) {
-            if rx.frame_type.contains(FrameType::VIDEO) && rx.timestamp == 12345 {
-                got = Some(rx);
-                break;
-            }
+        if let Ok(Some(rx)) = receiver.receive(50)
+            && rx.frame_type.contains(FrameType::VIDEO)
+            && rx.timestamp == 12345
+        {
+            got = Some(rx);
+            break;
         }
         thread::sleep(Duration::from_millis(10));
     }

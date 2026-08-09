@@ -5,21 +5,21 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-use crate::clock::{resolve_timestamp, TimestampClock};
+use crate::clock::{TimestampClock, resolve_timestamp};
 use crate::codec::fpa1;
 use crate::error::OmtError;
 use crate::protocol::frame::{
-    AssembledFrame, AudioHeader, FrameHeader, VideoHeader, AUDIO_EXT_HEADER_SIZE,
-    PROTOCOL_VERSION, VIDEO_EXT_HEADER_SIZE,
+    AUDIO_EXT_HEADER_SIZE, AssembledFrame, AudioHeader, FrameHeader, PROTOCOL_VERSION,
+    VIDEO_EXT_HEADER_SIZE, VideoHeader,
 };
 use crate::protocol::metadata::{
-    decode_metadata_xml, encode_metadata_xml, tally_xml, PREVIEW_OFF, PREVIEW_ON, SUBSCRIBE_AUDIO,
-    SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO,
+    PREVIEW_OFF, PREVIEW_ON, SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO,
+    decode_metadata_xml, encode_metadata_xml, tally_xml,
 };
 use crate::transport::socket::{configure_stream, into_listener, listen};
 use crate::types::{
-    Codec, FrameType, MediaFrame, Quality, SenderInfo, Statistics, Tally, VideoFlags,
-    NETWORK_PORT_END, NETWORK_PORT_START,
+    Codec, FrameType, MediaFrame, NETWORK_PORT_END, NETWORK_PORT_START, Quality, SenderInfo,
+    Statistics, Tally, VideoFlags,
 };
 
 /// Peer subscription / control state.
@@ -73,7 +73,10 @@ impl Sender {
     }
 
     /// Create without binding a socket (unit-test / offline mode).
-    pub fn create_offline(name: impl Into<String>, frame_types: FrameType) -> Result<Self, OmtError> {
+    pub fn create_offline(
+        name: impl Into<String>,
+        frame_types: FrameType,
+    ) -> Result<Self, OmtError> {
         let name = name.into();
         if name.is_empty() {
             return Err(OmtError::InvalidArgument("sender name is empty".into()));
@@ -150,15 +153,14 @@ impl Sender {
             match stream.read(&mut buf) {
                 Ok(0) => dead.push(*id),
                 Ok(n) => {
-                    if let Ok(frame) =
-                        crate::protocol::frame::AssembledFrame::from_bytes(&buf[..n])
+                    if let Ok(frame) = crate::protocol::frame::AssembledFrame::from_bytes(&buf[..n])
                     {
                         if let Ok(xml) = decode_metadata_xml(&frame.metadata) {
                             apply_metadata(state, &xml);
-                        } else if frame.header.frame_type.contains(FrameType::METADATA) {
-                            if let Ok(xml) = decode_metadata_xml(&frame.data) {
-                                apply_metadata(state, &xml);
-                            }
+                        } else if frame.header.frame_type.contains(FrameType::METADATA)
+                            && let Ok(xml) = decode_metadata_xml(&frame.data)
+                        {
+                            apply_metadata(state, &xml);
                         }
                     }
                 }

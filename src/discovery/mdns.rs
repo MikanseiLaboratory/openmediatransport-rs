@@ -38,8 +38,8 @@ fn state() -> Result<Arc<Mutex<MdnsState>>, OmtError> {
     if let Some(s) = STATE.get() {
         return Ok(Arc::clone(s));
     }
-    let daemon = ServiceDaemon::new()
-        .map_err(|e| OmtError::Discovery(format!("mdns-sd daemon: {e}")))?;
+    let daemon =
+        ServiceDaemon::new().map_err(|e| OmtError::Discovery(format!("mdns-sd daemon: {e}")))?;
     let receiver = daemon
         .browse(SERVICE_TYPE)
         .map_err(|e| OmtError::Discovery(format!("mdns-sd browse: {e}")))?;
@@ -56,10 +56,10 @@ fn state() -> Result<Arc<Mutex<MdnsState>>, OmtError> {
             while let Ok(event) = receiver.recv() {
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
-                        if let Some(entry) = resolved_entry(&info) {
-                            if let Ok(mut g) = state_c.lock() {
-                                g.discovered.insert(entry.fullname.clone(), entry);
-                            }
+                        if let Some(entry) = resolved_entry(&info)
+                            && let Ok(mut g) = state_c.lock()
+                        {
+                            g.discovered.insert(entry.fullname.clone(), entry);
                         }
                     }
                     ServiceEvent::ServiceRemoved(_, fullname) => {
@@ -182,9 +182,5 @@ fn host_label_from_instance(instance: &str) -> String {
             out.push('-');
         }
     }
-    if out.is_empty() {
-        "host".into()
-    } else {
-        out
-    }
+    if out.is_empty() { "host".into() } else { out }
 }

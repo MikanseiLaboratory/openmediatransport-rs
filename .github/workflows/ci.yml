@@ -36,6 +36,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: MikanseiLaboratory/vmx-rs
-          path: ../vmx-rs
+          path: vmx-rs
       - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
       - run: cargo test --tests ${{ matrix.features }}

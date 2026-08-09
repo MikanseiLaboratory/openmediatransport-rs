@@ -1,4 +1,5 @@
 //! Frame buffer pools.
+#![allow(dead_code)]
 
 use crate::types::{
     AUDIO_FRAME_POOL_COUNT, AUDIO_MIN_SIZE, METADATA_FRAME_SIZE, VIDEO_FRAME_POOL_COUNT,

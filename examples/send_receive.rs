@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Allow accept + subscribe
     for _ in 0..50 {
         let _ = sender.poll_accept()?;
-        let _ = sender.poll_peer_metadata()?;
+        sender.poll_peer_metadata()?;
         if sender.video_subscribed() {
             break;
         }

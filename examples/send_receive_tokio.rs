@@ -6,7 +6,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use openmediatransport::async_api::{AsyncReceiver, AsyncSender};
     use openmediatransport::{FrameType, MediaFrame};
 
-    let mut sender = AsyncSender::create("TokioSrc", FrameType::VIDEO | FrameType::METADATA).await?;
+    let mut sender =
+        AsyncSender::create("TokioSrc", FrameType::VIDEO | FrameType::METADATA).await?;
     let port = sender.port();
     let mut receiver =
         AsyncReceiver::create(format!("omt://127.0.0.1:{port}"), FrameType::VIDEO).await?;
@@ -14,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for _ in 0..50 {
         let _ = sender.poll_accept().await?;
-        let _ = sender.poll_peer_metadata().await?;
+        sender.poll_peer_metadata().await?;
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     sender.force_subscribe(true, false, true);
