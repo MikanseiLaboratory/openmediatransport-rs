@@ -23,6 +23,17 @@ Depends on [`vmx-rs`](../vmx-rs) for the VMX1 video codec. No Bonjour, Avahi, .N
 | *(default)* | Sync `Sender` / `Receiver` / `Discovery` |
 | `tokio` | Async wrappers (`AsyncSender` / `AsyncReceiver`) |
 
+Video codec work comes from [`vmx-rs`](https://github.com/MikanseiLaboratory/vmx-rs) (SIMD + **rayon** slice parallelism). See that README for the live vs stub SIMD matrix versus official [libvmx](https://github.com/openmediatransport/libvmx).
+
+### Tokio + rayon
+
+They address different layers and are meant to coexist:
+
+- **Tokio** (this crate, `tokio` feature): TCP accept/read/write, timers, async examples
+- **rayon** (inside `vmx`): CPU-bound slice encode/decode
+
+Do not run DCT on Tokio worker futures directly. The async API uses `tokio::task::block_in_place` around sync send/receive so the multi-thread scheduler can keep other tasks running while `vmx`/`rayon` use the CPU. Prefer `#[tokio::main(flavor = "multi_thread")]` (required for `block_in_place`).
+
 ## MSRV
 
 **Rust 1.88** (`edition = "2024"`).
