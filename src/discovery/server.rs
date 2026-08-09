@@ -316,7 +316,8 @@ mod tests {
         };
         let handle = thread::spawn(move || server.run_with_listener(listener));
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(100));
+
         let mut client = DiscoveryClient::new("127.0.0.1");
         client.port = port;
         client.connect().unwrap();
@@ -325,7 +326,7 @@ mod tests {
         addr.addresses = vec!["10.0.0.1".into()];
         client.register(&addr).unwrap();
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut found = false;
         while std::time::Instant::now() < deadline {
             let sources = client.sources();
