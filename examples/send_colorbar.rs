@@ -97,6 +97,7 @@ fn run(opts: SendOptions) -> Result<(), Box<dyn std::error::Error>> {
     let stride = (opts.width as usize) * 2;
     let mut uyvy = vec![0u8; stride * opts.height as usize];
     let mut vmx_buf = vec![0u8; 8 << 20];
+    let mut send_payload = Vec::with_capacity(1 << 20);
     let mut cached_vmx: Option<Vec<u8>> = None;
     let mut frame_idx = 0u64;
     let mut last_sub = (false, false);
@@ -149,7 +150,9 @@ fn run(opts: SendOptions) -> Result<(), Box<dyn std::error::Error>> {
             fill_colorbar_uyvy(&mut uyvy, opts.width, opts.height, phase);
             vmx.encode_uyvy(&uyvy, stride)?;
             let n = vmx.save_to(&mut vmx_buf)?;
-            vmx_buf[..n].to_vec()
+            send_payload.clear();
+            send_payload.extend_from_slice(&vmx_buf[..n]);
+            send_payload.clone()
         };
         encode_us_acc += t0.elapsed().as_micros() as u64;
 

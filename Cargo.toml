@@ -51,3 +51,8 @@ name = "send_colorbar"
 [[example]]
 name = "send_colorbar_tokio"
 required-features = ["tokio"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

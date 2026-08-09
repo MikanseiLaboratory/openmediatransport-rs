@@ -152,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stride = (opts.width as usize) * 2;
     let mut uyvy = vec![0u8; stride * opts.height as usize];
     let mut vmx_buf = vec![0u8; 8 << 20];
+    let mut send_payload = Vec::with_capacity(1 << 20);
     let mut cached_vmx: Option<Vec<u8>> = None;
     let mut frame_idx = 0u64;
     let mut last_stats = Instant::now();
@@ -191,11 +192,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let payload = if let Some(cached) = cached_vmx.as_ref() {
             cached.clone()
         } else {
-            let phase = ((frame_idx % 300) as f32) / 300.0;
-            fill_colorbar_uyvy(&mut uyvy, opts.width, opts.height, phase);
-            vmx.encode_uyvy(&uyvy, stride)?;
-            let n = vmx.save_to(&mut vmx_buf)?;
-            vmx_buf[..n].to_vec()
+            // Keep VMX encode off the async cooperative budget.
+            tokio::task::block_in_place(|| {
+                let phase = ((frame_idx % 300) as f32) / 300.0;
+                fill_colorbar_uyvy(&mut uyvy, opts.width, opts.height, phase);
+                vmx.encode_uyvy(&uyvy, stride)?;
+                let n = vmx.save_to(&mut vmx_buf)?;
+                send_payload.clear();
+                send_payload.extend_from_slice(&vmx_buf[..n]);
+                Ok::<_, Box<dyn std::error::Error>>(send_payload.clone())
+            })?
         };
         encode_us_acc += t0.elapsed().as_micros() as u64;
 

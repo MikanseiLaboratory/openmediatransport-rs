@@ -34,6 +34,9 @@ jobs:
           components: clippy
       - name: Checkout vmx-rs sibling
         shell: bash
-        run: git clone --depth 1 https://github.com/MikanseiLaboratory/vmx-rs.git "${GITHUB_WORKSPACE}/../vmx-rs"
+        run: |
+          # Keep in sync with MikanseiLaboratory/vmx-rs#perf/sse-rayon-hotpath until that lands on main.
+          git clone --depth 1 --branch perf/sse-rayon-hotpath \
+            https://github.com/MikanseiLaboratory/vmx-rs.git "${GITHUB_WORKSPACE}/../vmx-rs"
       - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
       - run: cargo test --tests ${{ matrix.features }}
