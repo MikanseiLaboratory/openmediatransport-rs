@@ -19,7 +19,6 @@ use crate::types::{
 };
 
 /// Receives frames from an OMT source (dual connections for A/V + metadata).
-#[derive(Debug)]
 pub struct Receiver {
     address: String,
     parsed: OmtAddress,
@@ -34,6 +33,10 @@ pub struct Receiver {
     #[allow(dead_code)]
     meta_channel: Channel,
     subscribed: bool,
+    /// Cached VMX decoder; reused while `codec.size()` matches the frame.
+    vmx_codec: Option<vmx::Codec>,
+    /// Reused decode output buffer.
+    vmx_decode_buf: Vec<u8>,
 }
 
 impl Receiver {
@@ -59,6 +62,8 @@ impl Receiver {
             av_channel: Channel::new(FrameType::VIDEO | FrameType::AUDIO),
             meta_channel: Channel::new(FrameType::METADATA),
             subscribed: false,
+            vmx_codec: None,
+            vmx_decode_buf: Vec::new(),
         })
     }
 
@@ -218,6 +223,8 @@ impl Receiver {
                         frame,
                         self.flags,
                         self.preferred_format,
+                        &mut self.vmx_codec,
+                        &mut self.vmx_decode_buf,
                     )?));
                 }
                 Ok(None) => {
@@ -261,6 +268,8 @@ impl Receiver {
                     frame,
                     self.flags,
                     self.preferred_format,
+                    &mut self.vmx_codec,
+                    &mut self.vmx_decode_buf,
                 )?))
             }
             None => Ok(None),
@@ -296,6 +305,8 @@ fn decode_received(
     frame: AssembledFrame,
     flags: ReceiveFlags,
     preferred: PreferredVideoFormat,
+    vmx_codec: &mut Option<vmx::Codec>,
+    vmx_decode_buf: &mut Vec<u8>,
 ) -> Result<ReceivedFrame, OmtError> {
     let metadata = if frame.metadata.is_empty() {
         None
@@ -305,10 +316,11 @@ fn decode_received(
         )?)
     };
 
+    let frame_data = frame.data;
     let mut media = MediaFrame {
         frame_type: frame.header.frame_type,
         timestamp: frame.header.timestamp,
-        data: frame.data.clone(),
+        data: Vec::new(),
         frame_metadata: metadata.clone(),
         ..MediaFrame::default()
     };
@@ -327,22 +339,32 @@ fn decode_received(
             if flags.contains(ReceiveFlags::INCLUDE_COMPRESSED)
                 || flags.contains(ReceiveFlags::COMPRESSED_ONLY)
             {
-                media.compressed = Some(frame.data.clone());
+                media.compressed = Some(frame_data.clone());
             }
             if flags.contains(ReceiveFlags::COMPRESSED_ONLY) {
-                media.data.clear();
-            } else if let Ok(decoded) = try_decode_vmx(&frame.data, v.width, v.height, preferred) {
+                media.data = frame_data;
+            } else if let Ok(decoded) = try_decode_vmx(
+                &frame_data,
+                v.width,
+                v.height,
+                v.color_space,
+                preferred,
+                vmx_codec,
+                vmx_decode_buf,
+            ) {
                 media.data = decoded;
                 media.codec = match preferred {
                     PreferredVideoFormat::Bgra => Codec::Bgra.as_i32(),
                     PreferredVideoFormat::P216 => Codec::P216.as_i32(),
                     _ => Codec::Uyvy.as_i32(),
                 };
+            } else {
+                media.data = frame_data;
             }
+        } else {
+            media.data = frame_data;
         }
-    }
-
-    if let Some(a) = frame.audio {
+    } else if let Some(a) = frame.audio {
         media.codec = a.codec.as_i32();
         media.sample_rate = a.sample_rate;
         media.channels = a.channels;
@@ -350,7 +372,7 @@ fn decode_received(
         media.active_channels = a.active_channels;
         if a.codec == Codec::Fpa1 {
             let planes = fpa1::decode_planar(
-                &frame.data,
+                &frame_data,
                 a.channels.max(0) as usize,
                 a.samples_per_channel.max(0) as usize,
                 a.active_channels,
@@ -365,13 +387,18 @@ fn decode_received(
             if a.channels > 0 {
                 media.active_channels = (1u32 << a.channels) - 1;
             }
+        } else {
+            media.data = frame_data;
         }
+    } else {
+        media.data = frame_data;
     }
 
+    let data = media.data.clone();
     Ok(ReceivedFrame {
         frame_type: frame.header.frame_type,
         timestamp: frame.header.timestamp,
-        data: media.data.clone(),
+        data,
         metadata,
         media,
     })
@@ -381,41 +408,75 @@ fn try_decode_vmx(
     data: &[u8],
     width: i32,
     height: i32,
+    color_space: crate::types::ColorSpace,
     preferred: PreferredVideoFormat,
+    cached: &mut Option<vmx::Codec>,
+    decode_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>, OmtError> {
     if width < vmx::MIN_WIDTH || height < vmx::MIN_HEIGHT {
         return Err(OmtError::Codec("VMX dimensions below minimum".into()));
     }
+    let vmx_cs = match color_space {
+        crate::types::ColorSpace::Bt601 => vmx::ColorSpace::Bt601,
+        crate::types::ColorSpace::Bt709 => vmx::ColorSpace::Bt709,
+        crate::types::ColorSpace::Undefined => vmx::ColorSpace::Undefined,
+    };
     // Guard against panics inside vmx on corrupt bitstreams / edge sizes.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let config = vmx::Config::new(width, height);
-        let mut codec = vmx::Codec::new(config)?;
+        // Reuse the instance when geometry matches — size lives on the Codec,
+        // not a parallel (w,h) key. Profile is decode-irrelevant (quality comes
+        // from the bitstream); color_space is baked at create for BGRA convert.
+        let reuse = cached.as_ref().is_some_and(|c| {
+            let s = c.size();
+            s.width == width && s.height == height
+        });
+        if !reuse {
+            *cached = Some(vmx::Codec::new(vmx::Config {
+                width,
+                height,
+                // Threads/quality presets only; bitstream overrides quality.
+                profile: vmx::Profile::OmtSq,
+                color_space: vmx_cs,
+            })?);
+        } else if let Some(codec) = cached.as_mut() {
+            codec.set_color_space(vmx_cs);
+        }
+        let codec = cached.as_mut().unwrap();
         codec.load_from(data)?;
         match preferred {
             PreferredVideoFormat::Bgra => {
                 let stride = (width as usize) * 4;
-                let mut dst = vec![0u8; stride * height as usize];
+                let need = stride * height as usize;
+                let mut dst = std::mem::take(decode_buf);
+                dst.resize(need, 0);
                 codec.decode_bgra(&mut dst, stride)?;
                 Ok(dst)
             }
             PreferredVideoFormat::P216 => {
                 let y_stride = (width as usize) * 2;
                 let uv_stride = width as usize * 2;
-                let mut y = vec![0u8; y_stride * height as usize];
-                let mut uv = vec![0u8; uv_stride * height as usize];
-                codec.decode_p216(&mut y, y_stride, &mut uv, uv_stride)?;
-                y.extend_from_slice(&uv);
-                Ok(y)
+                let y_len = y_stride * height as usize;
+                let uv_len = uv_stride * height as usize;
+                let mut dst = std::mem::take(decode_buf);
+                dst.resize(y_len + uv_len, 0);
+                let (y, uv) = dst.split_at_mut(y_len);
+                codec.decode_p216(y, y_stride, uv, uv_stride)?;
+                Ok(dst)
             }
             _ => {
                 let stride = (width as usize) * 2;
-                let mut dst = vec![0u8; stride * height as usize];
+                let need = stride * height as usize;
+                let mut dst = std::mem::take(decode_buf);
+                dst.resize(need, 0);
                 codec.decode_uyvy(&mut dst, stride)?;
                 Ok(dst)
             }
         }
     }))
-    .unwrap_or_else(|_| Err(OmtError::Codec("VMX decode panicked".into())))
+    .unwrap_or_else(|_| {
+        *cached = None;
+        Err(OmtError::Codec("VMX decode panicked".into()))
+    })
 }
 
 /// Received frame with decoded payload when applicable.

@@ -1,6 +1,8 @@
 //! Tokio-based async API (feature = `tokio`).
 //!
-//! Thin async wrappers around the sync sender/receiver protocol logic.
+//! Thin wrappers around the sync sender/receiver. Blocking socket / VMX work uses
+//! [`tokio::task::block_in_place`] so the multi-thread scheduler can continue
+//! serving other tasks. Slice-level codec parallelism stays in `vmx` via rayon.
 
 use std::time::Duration;
 
@@ -54,29 +56,34 @@ impl AsyncSender {
 
     /// Accept one pending peer connection.
     pub async fn poll_accept(&mut self) -> Result<bool, OmtError> {
-        self.inner.poll_accept()
+        tokio::task::block_in_place(|| self.inner.poll_accept())
     }
 
     /// Process inbound subscribe / tally / quality metadata from peers.
     pub async fn poll_peer_metadata(&mut self) -> Result<(), OmtError> {
-        self.inner.poll_peer_metadata()
+        tokio::task::block_in_place(|| self.inner.poll_peer_metadata())
     }
 
     /// Accept peers and process subscribe metadata.
     pub async fn poll(&mut self) -> Result<(), OmtError> {
-        self.inner.poll_accept()?;
-        self.inner.poll_peer_metadata()?;
-        Ok(())
+        tokio::task::block_in_place(|| {
+            self.inner.poll_accept()?;
+            self.inner.poll_peer_metadata()?;
+            Ok(())
+        })
     }
 
     /// Send a video frame asynchronously.
+    ///
+    /// Uses `block_in_place` so sync socket writes do not stall the multi-thread
+    /// scheduler's ability to run other tasks.
     pub async fn send_video(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
-        self.inner.send_video(frame)
+        tokio::task::block_in_place(|| self.inner.send_video(frame))
     }
 
     /// Send an audio frame asynchronously.
     pub async fn send_audio(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
-        self.inner.send_audio(frame)
+        tokio::task::block_in_place(|| self.inner.send_audio(frame))
     }
 
     /// Force subscriptions (tests / offline).
@@ -106,7 +113,6 @@ impl AsyncSender {
 }
 
 /// Async receiver wrapping the sync [`Receiver`] protocol logic.
-#[derive(Debug)]
 pub struct AsyncReceiver {
     inner: Receiver,
 }
@@ -153,8 +159,12 @@ impl AsyncReceiver {
     }
 
     /// Receive the next frame with a timeout in milliseconds.
+    ///
+    /// VMX decode is CPU-bound; `block_in_place` keeps the Tokio pool healthy
+    /// while the sync receiver runs (same pattern as `spawn_blocking`, without
+    /// requiring `'static` ownership of the receiver).
     pub async fn receive(&mut self, timeout_ms: i32) -> Result<Option<ReceivedFrame>, OmtError> {
-        self.inner.receive(timeout_ms)
+        tokio::task::block_in_place(|| self.inner.receive(timeout_ms))
     }
 
     /// Snapshot of receive statistics.
