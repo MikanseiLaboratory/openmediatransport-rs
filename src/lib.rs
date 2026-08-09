@@ -25,7 +25,7 @@ pub mod async_api;
 pub use discovery::{Discovery, DiscoveryClient, DiscoveryServer, OmtAddress};
 pub use error::OmtError;
 pub use receive::{ReceivedFrame, Receiver};
-pub use send::Sender;
+pub use send::{Sender, SenderConfig};
 pub use types::*;
 
 /// Re-export of the VMX codec crate used for VMX1 video.

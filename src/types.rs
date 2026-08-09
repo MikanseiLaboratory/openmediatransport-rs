@@ -305,6 +305,11 @@ impl Statistics {
         self.frames = self.frames.saturating_add(1);
         self.frames_since_last = self.frames_since_last.saturating_add(1);
     }
+
+    /// Record a frame dropped because the send queue was full (libomtnet async pool exhaustion).
+    pub fn record_dropped(&mut self) {
+        self.frames_dropped = self.frames_dropped.saturating_add(1);
+    }
 }
 
 /// Owned media frame (video, audio, or metadata).
@@ -380,12 +385,16 @@ pub const NETWORK_PORT_END: u16 = 6600;
 /// Default discovery server port.
 pub const DISCOVERY_SERVER_DEFAULT_PORT: u16 = 6399;
 
-/// Socket send buffer size.
+/// Socket send buffer size (libomtnet `NETWORK_SEND_BUFFER`).
 pub const NETWORK_SEND_BUFFER: usize = 65_536;
-/// Socket receive buffer size (8 MiB).
+/// Receive buffer used on sender-side peer sockets (libomtnet `NETWORK_SEND_RECEIVE_BUFFER`).
+pub const NETWORK_SEND_RECEIVE_BUFFER: usize = 65_536;
+/// Socket receive buffer size on receivers (8 MiB; libomtnet `NETWORK_RECEIVE_BUFFER`).
 pub const NETWORK_RECEIVE_BUFFER: usize = 1_048_576 * 8;
 /// Maximum bytes per async receive transfer.
 pub const NETWORK_RECEIVE_MAX_TRANSFER: usize = 128 * 1024;
+/// Outstanding async sends per channel before frames are dropped (libomtnet `NETWORK_ASYNC_COUNT`).
+pub const NETWORK_ASYNC_COUNT: usize = 4;
 /// Video frame pool depth.
 pub const VIDEO_FRAME_POOL_COUNT: usize = 4;
 /// Audio frame pool depth.

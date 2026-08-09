@@ -14,7 +14,7 @@ Depends on [`vmx-rs`](../vmx-rs) for the VMX1 video codec. No Bonjour, Avahi, .N
 | [libomt](https://github.com/openmediatransport/libomt) | Official C/C++ OMT core library |
 | [libomtnet](https://github.com/openmediatransport/libomtnet) | Official .NET OMT bindings |
 | [libvmx](https://github.com/openmediatransport/libvmx) | Official VMX1 video codec |
-| [vmx-rs](../vmx-rs) | Pure Rust VMX1 codec (this workspace) |
+| [vmx-rs](https://github.com/MikanseiLaboratory/vmx-rs) | Pure Rust VMX1 codec
 
 ## Features
 
@@ -52,6 +52,8 @@ cargo run --example send_receive
 cargo run --example send_receive_tokio --features tokio
 cargo run --example receive_to_jpeg
 cargo run --example receive_to_jpeg_tokio --features tokio
+cargo run --example send_colorbar
+cargo run --example send_colorbar_tokio --features tokio
 ```
 
 See [PROTOCOL.md](PROTOCOL.md) for the wire format.

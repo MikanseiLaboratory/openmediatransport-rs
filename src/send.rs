@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use crate::clock::{TimestampClock, resolve_timestamp};
 use crate::codec::fpa1;
@@ -16,10 +18,11 @@ use crate::protocol::metadata::{
     PREVIEW_OFF, PREVIEW_ON, SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO,
     decode_metadata_xml, encode_metadata_xml, tally_xml,
 };
-use crate::transport::socket::{configure_stream, into_listener, listen};
+use crate::transport::socket::{configure_stream_buffers, into_listener, listen};
 use crate::types::{
-    Codec, FrameType, MediaFrame, NETWORK_PORT_END, NETWORK_PORT_START, Quality, SenderInfo,
-    Statistics, Tally, VideoFlags,
+    Codec, FrameType, MediaFrame, NETWORK_ASYNC_COUNT, NETWORK_PORT_END, NETWORK_PORT_START,
+    NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER, Quality, SenderInfo, Statistics, Tally,
+    VideoFlags,
 };
 
 /// Peer subscription / control state.
@@ -33,6 +36,35 @@ struct PeerState {
     tally: Tally,
 }
 
+/// Sender transport / buffering configuration.
+///
+/// Defaults match libomtnet (`OMTConstants`):
+/// - socket send buffer: 64 KiB (`NETWORK_SEND_BUFFER`)
+/// - socket recv buffer on sender peers: 64 KiB (`NETWORK_SEND_RECEIVE_BUFFER`)
+/// - outstanding send queue depth: 4 (`NETWORK_ASYNC_COUNT`); when full, frames are dropped
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SenderConfig {
+    /// TCP `SO_SNDBUF` for peer connections.
+    pub send_buffer: usize,
+    /// TCP `SO_RCVBUF` for peer connections (control / subscribe traffic).
+    pub recv_buffer: usize,
+    /// Max frames queued for async socket writes.
+    ///
+    /// `0` = blocking synchronous `write_all` on the calling thread.
+    /// Default `4` matches libomtnet's async send pool; overflow drops the frame.
+    pub send_queue_depth: usize,
+}
+
+impl Default for SenderConfig {
+    fn default() -> Self {
+        Self {
+            send_buffer: NETWORK_SEND_BUFFER,
+            recv_buffer: NETWORK_SEND_RECEIVE_BUFFER,
+            send_queue_depth: NETWORK_ASYNC_COUNT,
+        }
+    }
+}
+
 /// Publishes an OMT source and sends media frames.
 #[derive(Debug)]
 pub struct Sender {
@@ -41,34 +73,52 @@ pub struct Sender {
     quality: Quality,
     stats: Statistics,
     info: SenderInfo,
-    clock: TimestampClock,
+    video_clock: TimestampClock,
+    audio_clock: TimestampClock,
     listener: Option<TcpListener>,
     port: u16,
     peers: Arc<Mutex<HashMap<usize, (TcpStream, PeerState)>>>,
     next_peer_id: usize,
     subscribed: PeerState,
+    config: SenderConfig,
+    /// When set, `broadcast` enqueues bytes for a background writer (libomtnet-style).
+    outbound_tx: Option<SyncSender<Vec<u8>>>,
 }
 
 impl Sender {
     /// Create a sender that listens on an available port in 6400..=6600.
     pub fn create(name: impl Into<String>, frame_types: FrameType) -> Result<Self, OmtError> {
+        Self::create_with_config(name, frame_types, SenderConfig::default())
+    }
+
+    /// Create a sender with explicit transport / buffering settings.
+    pub fn create_with_config(
+        name: impl Into<String>,
+        frame_types: FrameType,
+        config: SenderConfig,
+    ) -> Result<Self, OmtError> {
         let name = name.into();
         if name.is_empty() {
             return Err(OmtError::InvalidArgument("sender name is empty".into()));
         }
         let (listener, port) = bind_port_range()?;
+        let peers = Arc::new(Mutex::new(HashMap::new()));
+        let outbound_tx = spawn_outbound_writer(config.send_queue_depth, Arc::clone(&peers));
         Ok(Self {
             name,
             frame_types,
             quality: Quality::Default,
             stats: Statistics::default(),
             info: SenderInfo::default(),
-            clock: TimestampClock::new(),
+            video_clock: TimestampClock::new(),
+            audio_clock: TimestampClock::new(),
             listener: Some(listener),
             port,
-            peers: Arc::new(Mutex::new(HashMap::new())),
+            peers,
             next_peer_id: 1,
             subscribed: PeerState::default(),
+            config,
+            outbound_tx,
         })
     }
 
@@ -77,23 +127,42 @@ impl Sender {
         name: impl Into<String>,
         frame_types: FrameType,
     ) -> Result<Self, OmtError> {
+        Self::create_offline_with_config(name, frame_types, SenderConfig::default())
+    }
+
+    /// Offline sender with explicit transport config (queue unused without peers).
+    pub fn create_offline_with_config(
+        name: impl Into<String>,
+        frame_types: FrameType,
+        config: SenderConfig,
+    ) -> Result<Self, OmtError> {
         let name = name.into();
         if name.is_empty() {
             return Err(OmtError::InvalidArgument("sender name is empty".into()));
         }
+        let peers = Arc::new(Mutex::new(HashMap::new()));
+        let outbound_tx = spawn_outbound_writer(config.send_queue_depth, Arc::clone(&peers));
         Ok(Self {
             name,
             frame_types,
             quality: Quality::Default,
             stats: Statistics::default(),
             info: SenderInfo::default(),
-            clock: TimestampClock::new(),
+            video_clock: TimestampClock::new(),
+            audio_clock: TimestampClock::new(),
             listener: None,
             port: 0,
-            peers: Arc::new(Mutex::new(HashMap::new())),
+            peers,
             next_peer_id: 1,
             subscribed: PeerState::default(),
+            config,
+            outbound_tx,
         })
+    }
+
+    /// Current transport / buffering configuration.
+    pub fn transport_config(&self) -> SenderConfig {
+        self.config
     }
 
     /// Source name.
@@ -128,8 +197,30 @@ impl Sender {
         };
         listener.set_nonblocking(true)?;
         match listener.accept() {
-            Ok((stream, _)) => {
-                configure_stream(&stream)?;
+            Ok((mut stream, _)) => {
+                configure_stream_buffers(&stream, self.config.send_buffer, self.config.recv_buffer)?;
+                // libomtnet sends OMTInfo immediately on accept.
+                if !self.info.product_name.is_empty()
+                    || !self.info.manufacturer.is_empty()
+                    || !self.info.version.is_empty()
+                {
+                    let _ = stream.set_nonblocking(false);
+                    let data = encode_metadata_xml(&self.info.to_xml());
+                    let frame = AssembledFrame {
+                        header: FrameHeader {
+                            version: PROTOCOL_VERSION,
+                            frame_type: FrameType::METADATA,
+                            timestamp: 0,
+                            metadata_length: 0,
+                            data_length: data.len() as i32,
+                        },
+                        video: None,
+                        audio: None,
+                        data,
+                        metadata: Vec::new(),
+                    };
+                    let _ = stream.write_all(&frame.to_bytes());
+                }
                 stream.set_nonblocking(true)?;
                 let id = self.next_peer_id;
                 self.next_peer_id += 1;
@@ -153,15 +244,30 @@ impl Sender {
             match stream.read(&mut buf) {
                 Ok(0) => dead.push(*id),
                 Ok(n) => {
-                    if let Ok(frame) = crate::protocol::frame::AssembledFrame::from_bytes(&buf[..n])
-                    {
-                        if let Ok(xml) = decode_metadata_xml(&frame.metadata) {
-                            apply_metadata(state, &xml);
-                        } else if frame.header.frame_type.contains(FrameType::METADATA)
-                            && let Ok(xml) = decode_metadata_xml(&frame.data)
-                        {
-                            apply_metadata(state, &xml);
+                    let mut rest = &buf[..n];
+                    while rest.len() >= crate::protocol::frame::HEADER_SIZE {
+                        let header = match FrameHeader::from_bytes(rest) {
+                            Ok(h) => h,
+                            Err(_) => break,
+                        };
+                        if header.data_length < 0 {
+                            break;
                         }
+                        let total =
+                            crate::protocol::frame::HEADER_SIZE + header.data_length as usize;
+                        if rest.len() < total {
+                            break;
+                        }
+                        if let Ok(frame) = AssembledFrame::from_bytes(&rest[..total]) {
+                            if frame.header.frame_type.contains(FrameType::METADATA) {
+                                if let Ok(xml) = decode_metadata_xml(&frame.data) {
+                                    apply_metadata(state, &xml);
+                                }
+                            } else if let Ok(xml) = decode_metadata_xml(&frame.metadata) {
+                                apply_metadata(state, &xml);
+                            }
+                        }
+                        rest = &rest[total..];
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -226,13 +332,27 @@ impl Sender {
 
     /// Build a wire frame for a media frame (FPA1 sparse encode for audio).
     pub fn build_frame(&mut self, mut frame: MediaFrame) -> Result<AssembledFrame, OmtError> {
-        frame.timestamp = self.clock.resolve(
-            frame.timestamp,
-            frame.frame_rate_n,
-            frame.frame_rate_d,
-            frame.sample_rate,
-            frame.samples_per_channel,
-        );
+        let is_audio = frame.frame_type.contains(FrameType::AUDIO)
+            && !frame.frame_type.contains(FrameType::VIDEO);
+        frame.timestamp = if is_audio {
+            self.audio_clock.resolve(
+                frame.timestamp,
+                frame.frame_rate_n,
+                frame.frame_rate_d,
+                frame.sample_rate,
+                frame.samples_per_channel,
+            )
+        } else if frame.frame_type.contains(FrameType::VIDEO) {
+            self.video_clock.resolve(
+                frame.timestamp,
+                frame.frame_rate_n,
+                frame.frame_rate_d,
+                0,
+                0,
+            )
+        } else {
+            resolve_timestamp(frame.timestamp)
+        };
 
         let metadata = frame
             .frame_metadata
@@ -392,21 +512,26 @@ impl Sender {
 
     fn broadcast(&mut self, frame: &AssembledFrame) -> Result<(), OmtError> {
         let bytes = frame.to_bytes();
-        let mut peers = self.peers.lock().unwrap();
-        let mut dead = Vec::new();
-        for (id, (stream, _)) in peers.iter_mut() {
-            // Ensure full-frame writes (peers may have been set non-blocking for accept/poll).
-            let _ = stream.set_nonblocking(false);
-            if stream.write_all(&bytes).is_err() {
-                dead.push(*id);
-            } else {
-                let _ = stream.set_nonblocking(true);
+        let nbytes = bytes.len();
+        if let Some(tx) = &self.outbound_tx {
+            match tx.try_send(bytes) {
+                Ok(()) => {
+                    // Count as sent when accepted into the pool (matches libomtnet semantics).
+                    // Actual socket write happens on the writer thread.
+                    self.stats.record_sent(nbytes);
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    self.stats.record_dropped();
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    self.stats.record_dropped();
+                }
             }
+            return Ok(());
         }
-        for id in dead {
-            peers.remove(&id);
-        }
-        self.stats.record_sent(bytes.len());
+
+        write_peers(&self.peers, &bytes);
+        self.stats.record_sent(nbytes);
         Ok(())
     }
 
@@ -420,6 +545,42 @@ impl Sender {
     /// Snapshot of send statistics.
     pub fn statistics(&self) -> Statistics {
         self.stats
+    }
+}
+
+fn spawn_outbound_writer(
+    depth: usize,
+    peers: Arc<Mutex<HashMap<usize, (TcpStream, PeerState)>>>,
+) -> Option<SyncSender<Vec<u8>>> {
+    if depth == 0 {
+        return None;
+    }
+    let (tx, rx) = sync_channel::<Vec<u8>>(depth);
+    thread::Builder::new()
+        .name("omt-send".into())
+        .spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                write_peers(&peers, &bytes);
+            }
+        })
+        .ok();
+    Some(tx)
+}
+
+fn write_peers(peers: &Mutex<HashMap<usize, (TcpStream, PeerState)>>, bytes: &[u8]) {
+    let mut peers = peers.lock().unwrap();
+    let mut dead = Vec::new();
+    for (id, (stream, _)) in peers.iter_mut() {
+        // Ensure full-frame writes (peers may have been set non-blocking for accept/poll).
+        let _ = stream.set_nonblocking(false);
+        if stream.write_all(bytes).is_err() {
+            dead.push(*id);
+        } else {
+            let _ = stream.set_nonblocking(true);
+        }
+    }
+    for id in dead {
+        peers.remove(&id);
     }
 }
 

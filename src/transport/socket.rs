@@ -6,15 +6,31 @@ use std::time::Duration;
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::error::OmtError;
-use crate::types::{NETWORK_RECEIVE_BUFFER, NETWORK_SEND_BUFFER};
+use crate::types::{NETWORK_RECEIVE_BUFFER, NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER};
 
-/// Apply OMT-recommended TCP options (NODELAY, keepalive, buffers).
+/// Apply OMT-recommended TCP options for a **receiver** connection.
 pub fn configure_stream(stream: &TcpStream) -> Result<(), OmtError> {
+    configure_stream_buffers(stream, NETWORK_SEND_BUFFER, NETWORK_RECEIVE_BUFFER)
+}
+
+/// Apply OMT-recommended TCP options for a **sender-side** peer connection.
+///
+/// Matches libomtnet: 64 KiB send + 64 KiB receive on the sending channel.
+pub fn configure_sender_peer_stream(stream: &TcpStream) -> Result<(), OmtError> {
+    configure_stream_buffers(stream, NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER)
+}
+
+/// Apply TCP options with explicit buffer sizes.
+pub fn configure_stream_buffers(
+    stream: &TcpStream,
+    send_buffer: usize,
+    recv_buffer: usize,
+) -> Result<(), OmtError> {
     stream.set_nodelay(true)?;
     let sock = socket2::SockRef::from(stream);
     sock.set_keepalive(true)?;
-    let _ = sock.set_send_buffer_size(NETWORK_SEND_BUFFER);
-    let _ = sock.set_recv_buffer_size(NETWORK_RECEIVE_BUFFER);
+    let _ = sock.set_send_buffer_size(send_buffer);
+    let _ = sock.set_recv_buffer_size(recv_buffer);
     Ok(())
 }
 

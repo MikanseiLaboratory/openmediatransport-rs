@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::error::OmtError;
 use crate::receive::{ReceivedFrame, Receiver};
-use crate::send::Sender;
+use crate::send::{Sender, SenderConfig};
 use crate::types::{FrameType, MediaFrame, PreferredVideoFormat, Statistics};
 
 /// Async sender wrapping the sync [`Sender`] protocol logic.
@@ -18,9 +18,23 @@ pub struct AsyncSender {
 impl AsyncSender {
     /// Create an async sender (binds a listening port).
     pub async fn create(name: impl Into<String>, frame_types: FrameType) -> Result<Self, OmtError> {
+        Self::create_with_config(name, frame_types, SenderConfig::default()).await
+    }
+
+    /// Create an async sender with transport / buffering settings.
+    pub async fn create_with_config(
+        name: impl Into<String>,
+        frame_types: FrameType,
+        config: SenderConfig,
+    ) -> Result<Self, OmtError> {
         Ok(Self {
-            inner: Sender::create(name, frame_types)?,
+            inner: Sender::create_with_config(name, frame_types, config)?,
         })
+    }
+
+    /// Current transport / buffering configuration.
+    pub fn transport_config(&self) -> SenderConfig {
+        self.inner.transport_config()
     }
 
     /// Source name.
@@ -68,6 +82,26 @@ impl AsyncSender {
     /// Force subscriptions (tests / offline).
     pub fn force_subscribe(&mut self, video: bool, audio: bool, metadata: bool) {
         self.inner.force_subscribe(video, audio, metadata);
+    }
+
+    /// Set sender product info metadata.
+    pub fn set_sender_info(&mut self, info: crate::types::SenderInfo) {
+        self.inner.set_sender_info(info);
+    }
+
+    /// True when any peer has subscribed to video.
+    pub fn video_subscribed(&self) -> bool {
+        self.inner.video_subscribed()
+    }
+
+    /// True when any peer has subscribed to audio.
+    pub fn audio_subscribed(&self) -> bool {
+        self.inner.audio_subscribed()
+    }
+
+    /// Snapshot of send statistics.
+    pub fn statistics(&self) -> Statistics {
+        self.inner.statistics()
     }
 }
 
