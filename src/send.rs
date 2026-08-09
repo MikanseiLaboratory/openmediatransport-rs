@@ -594,6 +594,30 @@ impl Sender {
     pub fn statistics(&self) -> Statistics {
         self.stats
     }
+
+    /// Number of accepted peer TCP connections.
+    ///
+    /// Receivers typically open two connections (A/V and metadata), so client
+    /// count is approximately `connection_count() / 2`.
+    pub fn connection_count(&self) -> usize {
+        self.peers.lock().map(|p| p.len()).unwrap_or(0)
+    }
+
+    /// Peers currently subscribed to video.
+    pub fn video_subscriber_count(&self) -> usize {
+        self.peers
+            .lock()
+            .map(|p| p.values().filter(|(_, s)| s.video).count())
+            .unwrap_or(0)
+    }
+
+    /// Peers currently subscribed to audio.
+    pub fn audio_subscriber_count(&self) -> usize {
+        self.peers
+            .lock()
+            .map(|p| p.values().filter(|(_, s)| s.audio).count())
+            .unwrap_or(0)
+    }
 }
 
 /// Whether a peer should receive this frame type (matches libomtnet `OMTChannel.Send`).
