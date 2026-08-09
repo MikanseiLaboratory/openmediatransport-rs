@@ -2,10 +2,12 @@
 //!
 //! Thin async wrappers around the sync sender/receiver protocol logic.
 
+use std::time::Duration;
+
 use crate::error::OmtError;
 use crate::receive::{ReceivedFrame, Receiver};
 use crate::send::Sender;
-use crate::types::{FrameType, MediaFrame};
+use crate::types::{FrameType, MediaFrame, PreferredVideoFormat, Statistics};
 
 /// Async sender wrapping the sync [`Sender`] protocol logic.
 #[derive(Debug)]
@@ -96,13 +98,33 @@ impl AsyncReceiver {
         self.inner.frame_types()
     }
 
-    /// Connect dual TCP sessions.
+    /// Set preferred uncompressed video format.
+    pub fn set_preferred_format(&mut self, format: PreferredVideoFormat) {
+        self.inner.set_preferred_format(format);
+    }
+
+    /// Preferred format.
+    pub fn preferred_format(&self) -> PreferredVideoFormat {
+        self.inner.preferred_format()
+    }
+
+    /// Connect dual TCP sessions (no connect timeout).
     pub async fn connect(&mut self) -> Result<(), OmtError> {
         self.inner.connect(None)
+    }
+
+    /// Connect with an optional TCP connect timeout.
+    pub async fn connect_timeout(&mut self, timeout: Option<Duration>) -> Result<(), OmtError> {
+        self.inner.connect(timeout)
     }
 
     /// Receive the next frame with a timeout in milliseconds.
     pub async fn receive(&mut self, timeout_ms: i32) -> Result<Option<ReceivedFrame>, OmtError> {
         self.inner.receive(timeout_ms)
+    }
+
+    /// Snapshot of receive statistics.
+    pub fn statistics(&self) -> Statistics {
+        self.inner.statistics()
     }
 }

@@ -50,6 +50,8 @@ cargo test
 cargo run --example discovery
 cargo run --example send_receive
 cargo run --example send_receive_tokio --features tokio
+cargo run --example receive_to_jpeg
+cargo run --example receive_to_jpeg_tokio --features tokio
 ```
 
 See [PROTOCOL.md](PROTOCOL.md) for the wire format.
