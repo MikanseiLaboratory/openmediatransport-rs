@@ -33,9 +33,7 @@ jobs:
           toolchain: "1.88"
           components: clippy
       - name: Checkout vmx-rs sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MikanseiLaboratory/vmx-rs
-          path: ../vmx-rs
+        shell: bash
+        run: git clone --depth 1 https://github.com/MikanseiLaboratory/vmx-rs.git "${GITHUB_WORKSPACE}/../vmx-rs"
       - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
       - run: cargo test --tests ${{ matrix.features }}
