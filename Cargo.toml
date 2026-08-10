@@ -22,7 +22,7 @@ bytes = "1"
 tracing = "0.1"
 socket2 = "0.6"
 mdns-sd = "0.20"
-vmx = { path = "../vmx-rs" }
+vmx = { git = "https://github.com/MikanseiLaboratory/vmx-rs" }
 tokio = { version = "1", optional = true, features = ["net", "rt", "rt-multi-thread", "sync", "time", "macros", "io-util"] }
 
 [dev-dependencies]

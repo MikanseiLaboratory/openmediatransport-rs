@@ -32,9 +32,6 @@ jobs:
         with:
           toolchain: "1.97"
           components: clippy
-      - name: Checkout vmx-rs sibling
-        shell: bash
-        run: git clone --depth 1 https://github.com/MikanseiLaboratory/vmx-rs.git "${GITHUB_WORKSPACE}/../vmx-rs"
       - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
       # Network loopback tests bind 6400..=6600; serialize to avoid port races
       # (especially on Windows where SO_REUSEADDR can steal accepts).
