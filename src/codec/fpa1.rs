@@ -47,13 +47,16 @@ pub fn encode_planar(channels: &[&[f32]]) -> Result<(Vec<u8>, u32), OmtError> {
     Ok((out, active))
 }
 
-/// Unpack FPA1 payload into planar `f32` channels, expanding inactive channels to zeros.
-pub fn decode_planar(
+/// Unpack FPA1 payload into a single planar `f32` buffer (channel-major).
+///
+/// Layout: `[ch0_s0, ch0_s1, …, ch0_sN, ch1_s0, …]`.
+pub fn decode_planar_into(
     data: &[u8],
     channels: usize,
     samples_per_channel: usize,
     active_channels: u32,
-) -> Result<Vec<Vec<f32>>, OmtError> {
+    out: &mut Vec<u8>,
+) -> Result<(), OmtError> {
     if channels == 0 || channels > 32 {
         return Err(OmtError::InvalidArgument(
             "FPA1 channel count must be 1..=32".into(),
@@ -68,23 +71,46 @@ pub fn decode_planar(
         return Err(OmtError::Protocol("FPA1 payload too short".into()));
     }
 
-    let mut planes = Vec::with_capacity(channels);
+    let need = channels
+        .checked_mul(samples_per_channel)
+        .and_then(|n| n.checked_mul(AUDIO_SAMPLE_SIZE))
+        .ok_or_else(|| OmtError::InvalidArgument("FPA1 size overflow".into()))?;
+    out.clear();
+    out.resize(need, 0);
+
     let mut offset = 0usize;
     for i in 0..channels {
         let flag = 1u32 << i;
+        let plane_off = i * samples_per_channel * AUDIO_SAMPLE_SIZE;
         if (active_channels & flag) == flag {
-            let mut plane = Vec::with_capacity(samples_per_channel);
-            for _ in 0..samples_per_channel {
-                let bytes: [u8; 4] = data[offset..offset + 4]
-                    .try_into()
-                    .map_err(|_| OmtError::Protocol("FPA1 truncated sample".into()))?;
-                plane.push(f32::from_le_bytes(bytes));
-                offset += 4;
-            }
-            planes.push(plane);
-        } else {
-            planes.push(vec![0.0f32; samples_per_channel]);
+            let bytes = samples_per_channel * AUDIO_SAMPLE_SIZE;
+            out[plane_off..plane_off + bytes].copy_from_slice(&data[offset..offset + bytes]);
+            offset += bytes;
         }
+        // inactive channels already zero-filled by resize
+    }
+    Ok(())
+}
+
+/// Unpack FPA1 payload into planar `f32` channels, expanding inactive channels to zeros.
+pub fn decode_planar(
+    data: &[u8],
+    channels: usize,
+    samples_per_channel: usize,
+    active_channels: u32,
+) -> Result<Vec<Vec<f32>>, OmtError> {
+    let mut flat = Vec::new();
+    decode_planar_into(data, channels, samples_per_channel, active_channels, &mut flat)?;
+    let mut planes = Vec::with_capacity(channels);
+    for i in 0..channels {
+        let mut plane = Vec::with_capacity(samples_per_channel);
+        let base = i * samples_per_channel * AUDIO_SAMPLE_SIZE;
+        for s in 0..samples_per_channel {
+            let o = base + s * 4;
+            let bytes: [u8; 4] = flat[o..o + 4].try_into().unwrap();
+            plane.push(f32::from_le_bytes(bytes));
+        }
+        planes.push(plane);
     }
     Ok(planes)
 }
