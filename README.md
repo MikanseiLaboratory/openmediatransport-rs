@@ -4,8 +4,6 @@
 
 Pure Rust implementation of **Open Media Transport (OMT)** — video, audio, and metadata over TCP with DNS-SD discovery.
 
-Depends on [`vmx-rs`](../vmx-rs) for the VMX1 video codec. No Bonjour, Avahi, .NET, or native libomtnet linkage.
-
 > **Disclaimer:** This is an independent, community-maintained project. It is **not** an official Open Media Transport product or repository.
 
 ## Related projects
@@ -51,19 +49,6 @@ fn main() -> Result<(), openmediatransport::OmtError> {
     )?;
     Ok(())
 }
-```
-
-```bash
-cargo check
-cargo check --features tokio
-cargo test
-cargo run --example discovery
-cargo run --example send_receive
-cargo run --example send_receive_tokio --features tokio
-cargo run --example receive_to_jpeg
-cargo run --example receive_to_jpeg_tokio --features tokio
-cargo run --example send_colorbar
-cargo run --example send_colorbar_tokio --features tokio
 ```
 
 See [PROTOCOL.md](PROTOCOL.md) for the wire format.
