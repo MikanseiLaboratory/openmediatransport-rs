@@ -132,44 +132,6 @@ pub enum ColorSpace {
     Bt709 = 709,
 }
 
-/// Preferred uncompressed video format on receive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum PreferredVideoFormat {
-    /// Always UYVY.
-    #[default]
-    Uyvy = 0,
-    /// UYVY, or BGRA when alpha is present.
-    UyvyOrBgra = 1,
-    /// Always BGRA.
-    Bgra = 2,
-    /// UYVY, or UYVA when alpha is present.
-    UyvyOrUyva = 3,
-    /// Prefer high-bit-depth when available.
-    UyvyOrUyvaOrP216OrPa16 = 4,
-    /// Always P216.
-    P216 = 5,
-}
-
-/// Receiver feature flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct ReceiveFlags(pub u32);
-
-impl ReceiveFlags {
-    /// No flags.
-    pub const NONE: Self = Self(0);
-    /// Preview only.
-    pub const PREVIEW: Self = Self(1);
-    /// Include compressed copy.
-    pub const INCLUDE_COMPRESSED: Self = Self(2);
-    /// Compressed only (no decode).
-    pub const COMPRESSED_ONLY: Self = Self(4);
-
-    /// Returns true if `other` bits are set.
-    pub const fn contains(self, other: Self) -> bool {
-        (self.0 & other.0) == other.0
-    }
-}
-
 /// Video encoding quality suggestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(i32)]
@@ -422,3 +384,90 @@ pub const DNSSD_SERVICE_TYPE: &str = "_omt._tcp";
 pub const DNSSD_SERVICE_TYPE_LOCAL: &str = "_omt._tcp.local";
 /// Maximum DNS-SD instance name length (`MACHINE (Name)`).
 pub const MAX_INSTANCE_NAME_LENGTH: usize = 63;
+
+/// Decoded VMX1 video frame (BGRA8, tightly packed unless `stride` > width×4).
+#[derive(Debug, Clone)]
+pub struct DecodedVideoFrame {
+    /// Pixel width.
+    pub width: u32,
+    /// Pixel height.
+    pub height: u32,
+    /// Row stride in bytes.
+    pub stride: u32,
+    /// Timestamp (100 ns ticks).
+    pub timestamp: i64,
+    /// Frame rate numerator.
+    pub frame_rate_n: i32,
+    /// Frame rate denominator.
+    pub frame_rate_d: i32,
+    /// Color space used for YUV→RGB.
+    pub color_space: ColorSpace,
+    /// BGRA8 pixels (`Arc` for cheap handoff).
+    pub pixels: std::sync::Arc<[u8]>,
+    /// Optional per-frame metadata XML.
+    pub frame_metadata: Option<std::sync::Arc<str>>,
+}
+
+/// Decoded FPA1 audio frame (planar f32 bytes).
+#[derive(Debug, Clone)]
+pub struct DecodedAudioFrame {
+    /// Timestamp (100 ns ticks).
+    pub timestamp: i64,
+    /// Sample rate.
+    pub sample_rate: i32,
+    /// Channel count.
+    pub channels: i32,
+    /// Samples per channel.
+    pub samples_per_channel: i32,
+    /// Active channel bitfield from the wire.
+    pub active_channels: u32,
+    /// Planar f32 samples concatenated per channel.
+    pub pcm_planar_f32: std::sync::Arc<[u8]>,
+    /// Optional per-frame metadata XML.
+    pub frame_metadata: Option<std::sync::Arc<str>>,
+}
+
+/// Metadata-only frame.
+#[derive(Debug, Clone)]
+pub struct MetadataFrame {
+    /// Timestamp (100 ns ticks).
+    pub timestamp: i64,
+    /// XML / text payload.
+    pub xml: std::sync::Arc<str>,
+}
+
+/// Receiver session statistics (transport + decode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SessionStatistics {
+    /// Total bytes received on the wire.
+    pub bytes_received: u64,
+    /// Bytes since last sample.
+    pub bytes_received_since_last: u64,
+    /// Successfully decoded video frames.
+    pub frames_decoded: u64,
+    /// Video frames dropped at the wire queue (backpressure).
+    pub frames_dropped_wire: u64,
+    /// Video frames dropped at decode failure or latest-wins overwrite.
+    pub frames_dropped_decode: u64,
+    /// Audio frames dropped or rejected.
+    pub frames_dropped_audio: u64,
+    /// Accumulated VMX decode time in nanoseconds.
+    pub codec_time_ns: u64,
+    /// Peak single-frame decode time in nanoseconds.
+    pub codec_time_ns_peak: u64,
+    /// Peak wire→decode age observed (microseconds).
+    pub frame_age_us_peak: u64,
+    /// Current compressed-video wire queue depth.
+    pub wire_queue_depth: u32,
+    /// Current decoded-video slot occupancy (0 or 1).
+    pub decoded_queue_depth: u32,
+    /// Reconnect attempts.
+    pub reconnects: u64,
+}
+
+impl SessionStatistics {
+    /// Reset interval counters.
+    pub fn mark_sample(&mut self) {
+        self.bytes_received_since_last = 0;
+    }
+}

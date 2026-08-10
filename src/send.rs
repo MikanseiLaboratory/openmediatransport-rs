@@ -85,9 +85,9 @@ pub struct Sender {
     subscribed: PeerState,
     config: SenderConfig,
     /// Background queue for video (+ metadata) socket writes.
-    outbound_video: Option<SyncSender<(FrameType, Vec<u8>)>>,
+    outbound_video: Option<SyncSender<WireBytes>>,
     /// Background queue for audio socket writes (separate so video cannot stall audio).
-    outbound_audio: Option<SyncSender<(FrameType, Vec<u8>)>>,
+    outbound_audio: Option<SyncSender<WireBytes>>,
 }
 
 impl Sender {
@@ -394,10 +394,8 @@ impl Sender {
 
         if frame.frame_type.contains(FrameType::VIDEO) {
             let codec = Codec::from_i32(frame.codec).unwrap_or(Codec::Uyvy);
-            let mut flags = frame.flags;
-            if self.subscribed.preview {
-                flags = VideoFlags(flags.0 | VideoFlags::PREVIEW.0);
-            }
+            // Preview flag is applied per-peer in [`Self::broadcast`], not here.
+            let flags = frame.flags;
             let video = VideoHeader {
                 codec,
                 width: frame.width,
@@ -543,15 +541,25 @@ impl Sender {
 
     fn broadcast(&mut self, frame: &AssembledFrame) -> Result<(), OmtError> {
         let ft = frame.header.frame_type;
-        let bytes = frame.to_bytes();
-        let nbytes = bytes.len();
+        let full = frame.to_bytes();
+        let preview = if ft.contains(FrameType::VIDEO) {
+            preview_video_bytes(frame)
+        } else {
+            None
+        };
+        let nbytes = if self.subscribed.preview {
+            preview.as_ref().map(|p| p.len()).unwrap_or(full.len())
+        } else {
+            full.len()
+        };
+        let wire = WireBytes { ft, full, preview };
 
         // Metadata is small and control-plane — write synchronously to subscribed peers.
         if ft.contains(FrameType::METADATA)
             && !ft.contains(FrameType::VIDEO)
             && !ft.contains(FrameType::AUDIO)
         {
-            write_peers(&self.peers, ft, &bytes);
+            write_peers(&self.peers, &wire);
             self.stats.record_sent(nbytes);
             return Ok(());
         }
@@ -563,7 +571,7 @@ impl Sender {
         };
 
         if let Some(tx) = queue {
-            match tx.try_send((ft, bytes)) {
+            match tx.try_send(wire) {
                 Ok(()) => self.stats.record_sent(nbytes),
                 Err(std::sync::mpsc::TrySendError::Full(_)) => self.stats.record_dropped(),
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => self.stats.record_dropped(),
@@ -571,7 +579,7 @@ impl Sender {
             return Ok(());
         }
 
-        write_peers(&self.peers, ft, &bytes);
+        write_peers(&self.peers, &wire);
         self.stats.record_sent(nbytes);
         Ok(())
     }
@@ -590,10 +598,52 @@ impl Sender {
         }
     }
 
+    /// Force preview mode on all peers (tests / offline).
+    pub fn force_preview(&mut self, preview: bool) {
+        self.subscribed.preview = preview;
+        if let Ok(mut peers) = self.peers.lock() {
+            for (_, state) in peers.values_mut() {
+                state.preview = preview;
+            }
+        }
+    }
+
     /// Snapshot of send statistics.
     pub fn statistics(&self) -> Statistics {
         self.stats
     }
+
+    /// Number of accepted peer TCP connections.
+    ///
+    /// Receivers typically open two connections (A/V and metadata), so client
+    /// count is approximately `connection_count() / 2`.
+    pub fn connection_count(&self) -> usize {
+        self.peers.lock().map(|p| p.len()).unwrap_or(0)
+    }
+
+    /// Peers currently subscribed to video.
+    pub fn video_subscriber_count(&self) -> usize {
+        self.peers
+            .lock()
+            .map(|p| p.values().filter(|(_, s)| s.video).count())
+            .unwrap_or(0)
+    }
+
+    /// Peers currently subscribed to audio.
+    pub fn audio_subscriber_count(&self) -> usize {
+        self.peers
+            .lock()
+            .map(|p| p.values().filter(|(_, s)| s.audio).count())
+            .unwrap_or(0)
+    }
+}
+
+/// On-wire bytes for one outbound frame, with an optional preview variant.
+struct WireBytes {
+    ft: FrameType,
+    full: Vec<u8>,
+    /// DC-prefix + `VideoFlags::PREVIEW` serialization for preview peers.
+    preview: Option<Vec<u8>>,
 }
 
 /// Whether a peer should receive this frame type (matches libomtnet `OMTChannel.Send`).
@@ -617,29 +667,34 @@ fn spawn_typed_writer(
     depth: usize,
     peers: Arc<Mutex<HashMap<usize, (TcpStream, PeerState)>>>,
     name: &str,
-) -> Option<SyncSender<(FrameType, Vec<u8>)>> {
+) -> Option<SyncSender<WireBytes>> {
     if depth == 0 {
         return None;
     }
-    let (tx, rx) = sync_channel::<(FrameType, Vec<u8>)>(depth);
+    let (tx, rx) = sync_channel::<WireBytes>(depth);
     thread::Builder::new()
         .name(name.into())
         .spawn(move || {
-            while let Ok((ft, bytes)) = rx.recv() {
-                write_peers(&peers, ft, &bytes);
+            while let Ok(wire) = rx.recv() {
+                write_peers(&peers, &wire);
             }
         })
         .ok();
     Some(tx)
 }
 
-fn write_peers(peers: &Mutex<HashMap<usize, (TcpStream, PeerState)>>, ft: FrameType, bytes: &[u8]) {
+fn write_peers(peers: &Mutex<HashMap<usize, (TcpStream, PeerState)>>, wire: &WireBytes) {
     let mut peers = peers.lock().unwrap();
     let mut dead = Vec::new();
     for (id, (stream, state)) in peers.iter_mut() {
-        if !peer_wants(state, ft) {
+        if !peer_wants(state, wire.ft) {
             continue;
         }
+        let bytes = if wire.ft.contains(FrameType::VIDEO) && state.preview {
+            wire.preview.as_deref().unwrap_or(&wire.full)
+        } else {
+            &wire.full
+        };
         // Ensure full-frame writes (peers may have been set non-blocking for accept/poll).
         let _ = stream.set_nonblocking(false);
         if stream.write_all(bytes).is_err() {
@@ -651,6 +706,26 @@ fn write_peers(peers: &Mutex<HashMap<usize, (TcpStream, PeerState)>>, ft: FrameT
     for id in dead {
         peers.remove(&id);
     }
+}
+
+/// Build a preview-mode serialization of a VMX1 video frame (DC prefix + flag).
+fn preview_video_bytes(frame: &AssembledFrame) -> Option<Vec<u8>> {
+    let video = frame.video?;
+    if video.codec != Codec::Vmx1 {
+        return None;
+    }
+    let preview_len = vmx::preview_bitstream_length(&frame.data).ok()?;
+    if preview_len == 0 || preview_len > frame.data.len() {
+        return None;
+    }
+    let mut preview = frame.clone();
+    if let Some(v) = preview.video.as_mut() {
+        v.flags = VideoFlags(v.flags.0 | VideoFlags::PREVIEW.0);
+    }
+    preview.data.truncate(preview_len);
+    preview.header.data_length =
+        (VIDEO_EXT_HEADER_SIZE + preview.data.len() + preview.metadata.len()) as i32;
+    Some(preview.to_bytes())
 }
 
 fn apply_metadata(state: &mut PeerState, xml: &str) {
@@ -699,4 +774,54 @@ fn bind_port_range() -> Result<(TcpListener, u16), OmtError> {
     Err(OmtError::Network(format!(
         "no free port in {NETWORK_PORT_START}..={NETWORK_PORT_END}"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ColorSpace;
+
+    #[test]
+    fn preview_variant_is_shorter_vmx1_and_none_for_uyvy() {
+        let mut enc = vmx::Codec::new(vmx::Config::new(64, 64)).unwrap();
+        let stride = 64 * 2;
+        let uyvy = vec![128u8; stride * 64];
+        enc.encode_uyvy(&uyvy, stride).unwrap();
+        let mut buf = vec![0u8; 1 << 20];
+        let full_len = enc.save_to(&mut buf).unwrap();
+
+        let mut sender = Sender::create_offline("t", FrameType::VIDEO).unwrap();
+        let frame = sender
+            .build_frame(MediaFrame {
+                frame_type: FrameType::VIDEO,
+                codec: Codec::Vmx1 as i32,
+                width: 64,
+                height: 64,
+                frame_rate_n: 60,
+                frame_rate_d: 1,
+                aspect_ratio: 1.0,
+                color_space: ColorSpace::Bt709,
+                data: buf[..full_len].to_vec(),
+                ..Default::default()
+            })
+            .unwrap();
+        let full = frame.to_bytes();
+        let preview = preview_video_bytes(&frame).expect("preview bytes");
+        assert!(preview.len() < full.len());
+
+        let uyvy_frame = sender
+            .build_frame(MediaFrame {
+                frame_type: FrameType::VIDEO,
+                codec: Codec::Uyvy as i32,
+                width: 16,
+                height: 16,
+                frame_rate_n: 60,
+                frame_rate_d: 1,
+                aspect_ratio: 1.0,
+                data: vec![0u8; 16 * 16 * 2],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(preview_video_bytes(&uyvy_frame).is_none());
+    }
 }

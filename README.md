@@ -20,8 +20,8 @@ Depends on [`vmx-rs`](../vmx-rs) for the VMX1 video codec. No Bonjour, Avahi, .N
 
 | Feature | Description |
 |---------|-------------|
-| *(default)* | Sync `Sender` / `Receiver` / `Discovery` |
-| `tokio` | Async wrappers (`AsyncSender` / `AsyncReceiver`; multi-thread runtime) |
+| *(default)* | Sync `Sender` / `ReceiverSession` / `Discovery` (VMX1 BGRA receive, optional 1/8 Preview) |
+| `tokio` | Async wrappers (`AsyncSender` / `AsyncReceiver` over `ReceiverSession`) |
 
 Codec SIMD / rayon details: [`vmx-rs` README](https://github.com/MikanseiLaboratory/vmx-rs).
 
@@ -32,7 +32,7 @@ Codec SIMD / rayon details: [`vmx-rs` README](https://github.com/MikanseiLaborat
 ## Quick start
 
 ```rust
-use openmediatransport::{Discovery, FrameType, Receiver, Sender};
+use openmediatransport::{Discovery, FrameType, ReceiverConfig, ReceiverSession, Sender};
 
 fn main() -> Result<(), openmediatransport::OmtError> {
     let mut discovery = Discovery::new()?;
@@ -40,7 +40,13 @@ fn main() -> Result<(), openmediatransport::OmtError> {
 
     let sender = Sender::create("My Source", FrameType::VIDEO | FrameType::AUDIO)?;
     let url = format!("omt://127.0.0.1:{}/My Source", sender.port());
-    let _receiver = Receiver::create(url, FrameType::VIDEO)?;
+    let _receiver = ReceiverSession::connect(
+        url,
+        ReceiverConfig {
+            frame_types: FrameType::VIDEO,
+            ..ReceiverConfig::default()
+        },
+    )?;
     Ok(())
 }
 ```
@@ -62,4 +68,4 @@ See [PROTOCOL.md](PROTOCOL.md) for the wire format.
 
 ## License
 
-MIT — Copyright (c) 2025 Open Media Transport Contributors and MikanseiLaboratory
+MIT — Copyright (c) 2026 Open Media Transport Contributors and MikanseiLaboratory

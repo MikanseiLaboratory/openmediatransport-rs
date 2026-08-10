@@ -5,6 +5,8 @@
 mod clock;
 /// Media codecs (FPA1, etc.).
 pub mod codec;
+/// Packed pixel helpers (BGRA↔RGBA, …).
+pub mod color;
 mod discovery;
 mod error;
 mod logging;
@@ -22,9 +24,10 @@ pub mod types;
 #[cfg(feature = "tokio")]
 pub mod async_api;
 
+pub use color::{bgra_alpha_mask, bgra_to_rgba, bgra_to_rgba_into, uyvy_to_rgba};
 pub use discovery::{Discovery, DiscoveryClient, DiscoveryServer, OmtAddress};
 pub use error::OmtError;
-pub use receive::{ReceivedFrame, Receiver};
+pub use receive::{ReceiverConfig, ReceiverSession, SessionState};
 pub use send::{Sender, SenderConfig};
 pub use types::*;
 

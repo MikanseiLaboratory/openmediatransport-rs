@@ -1,6 +1,4 @@
 //! Tokio receive-to-JPEG example (`--features tokio`).
-//!
-//! Receive live OMT video (e.g. from vMix) and dump decoded frames as JPEG.
 
 #[cfg(feature = "tokio")]
 #[tokio::main(flavor = "multi_thread")]
@@ -9,8 +7,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    use openmediatransport::FrameType;
     use openmediatransport::async_api::AsyncReceiver;
-    use openmediatransport::{Codec, FrameType, PreferredVideoFormat};
 
     let mut args = env::args().skip(1);
     let url_arg = args.next();
@@ -22,26 +20,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&out_dir)?;
 
-    let url = match url_arg {
-        Some(u) if u.starts_with("omt://") => u,
+    let (url, addresses) = match url_arg {
+        Some(u) if u.starts_with("omt://") => (u, Vec::new()),
         Some(other) => {
             eprintln!("Unexpected argument (expected omt:// URL): {other}");
             std::process::exit(2);
         }
-        None => {
-            // Discovery is sync today; run it on a blocking thread.
-            tokio::task::spawn_blocking(discover_first_url)
-                .await?
-                .map_err(|e| -> Box<dyn std::error::Error> { e })?
-        }
+        None => tokio::task::spawn_blocking(discover_first)
+            .await?
+            .map_err(|e| -> Box<dyn std::error::Error> { e })?,
     };
 
     println!("Connecting to {url}");
-    let mut receiver = AsyncReceiver::create(&url, FrameType::VIDEO).await?;
-    receiver.set_preferred_format(PreferredVideoFormat::Bgra);
-    receiver
-        .connect_timeout(Some(Duration::from_secs(5)))
-        .await?;
+    let mut receiver =
+        AsyncReceiver::connect_with_addresses(&url, &addresses, FrameType::VIDEO).await?;
     println!("Connected; waiting for video frames…");
 
     let mut saved = 0usize;
@@ -50,60 +42,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     while saved < max_frames && Instant::now() < deadline {
         attempts += 1;
-        match receiver.receive(500).await? {
-            Some(frame) if frame.frame_type.contains(FrameType::VIDEO) => {
-                let m = &frame.media;
-                let codec = Codec::from_i32(m.codec);
-                println!(
-                    "frame#{attempts}: {}x{} codec={:?} data_len={} ts={}",
-                    m.width,
-                    m.height,
-                    codec,
-                    frame.data.len(),
-                    frame.timestamp
-                );
-
-                let expected_bgra = (m.width as usize) * 4 * (m.height as usize);
-                if codec != Some(Codec::Bgra) || frame.data.len() != expected_bgra {
-                    eprintln!(
-                        "  skip: expected decoded BGRA ({expected_bgra} bytes), got codec={:?} len={}",
-                        codec,
-                        frame.data.len()
-                    );
-                    if saved == 0 {
-                        let raw_path = out_dir.join(format!("frame_{saved:03}_raw.bin"));
-                        std::fs::write(&raw_path, &frame.data)?;
-                        eprintln!("  wrote raw payload to {}", raw_path.display());
-                    }
-                    continue;
-                }
-
-                let rgb = bgra_to_rgb(&frame.data, m.width as u32, m.height as u32)?;
-                let path = out_dir.join(format!("frame_{saved:03}.jpg"));
-                // JPEG encode is CPU-bound; keep it off the async path.
-                let path_clone = path.clone();
-                tokio::task::spawn_blocking(move || rgb.save(&path_clone)).await??;
-                println!("  wrote {}", path.display());
-                saved += 1;
-            }
-            Some(frame) => {
-                let meta = frame.metadata.as_deref().unwrap_or("");
-                let data_preview = String::from_utf8_lossy(&frame.data);
-                println!(
-                    "frame#{attempts}: non-video type={} len={} data={:?} meta={meta:?}",
-                    frame.frame_type.0,
-                    frame.data.len(),
-                    data_preview.chars().take(80).collect::<String>()
-                );
-            }
-            None => {}
+        if let Some(frame) = receiver.recv_video(500).await {
+            println!(
+                "frame#{attempts}: {}x{} pixels={} ts={}",
+                frame.width,
+                frame.height,
+                frame.pixels.len(),
+                frame.timestamp
+            );
+            let rgb = bgra_to_rgb(&frame.pixels, frame.width, frame.height)?;
+            let path = out_dir.join(format!("frame_{saved:03}.jpg"));
+            let path_clone = path.clone();
+            tokio::task::spawn_blocking(move || rgb.save(&path_clone)).await??;
+            println!("  wrote {}", path.display());
+            saved += 1;
         }
     }
 
     let stats = receiver.statistics();
     println!(
-        "Done: saved={saved}/{max_frames} attempts={attempts} bytes_received={} frames={}",
-        stats.bytes_received, stats.frames
+        "Done: saved={saved}/{max_frames} attempts={attempts} bytes_received={} decoded={}",
+        stats.bytes_received, stats.frames_decoded
     );
     if saved == 0 {
         Err("no decoded BGRA frames were saved".into())
@@ -113,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(feature = "tokio")]
-fn discover_first_url() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+fn discover_first() -> Result<(String, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
     use std::time::Duration;
 
     use openmediatransport::Discovery;
@@ -124,14 +83,15 @@ fn discover_first_url() -> Result<String, Box<dyn std::error::Error + Send + Syn
     println!("Discovered {} source(s)", sources.len());
     for src in sources {
         println!(
-            "  - {} port={} url={}",
+            "  - {} port={} url={} addrs={:?}",
             src.instance_name(),
             src.port,
-            src.to_url()
+            src.to_url(),
+            src.addresses
         );
     }
     let first = sources.first().ok_or("no OMT sources discovered")?;
-    Ok(first.to_url())
+    Ok((first.to_url(), first.addresses.clone()))
 }
 
 #[cfg(feature = "tokio")]
@@ -155,5 +115,5 @@ fn bgra_to_rgb(
 
 #[cfg(not(feature = "tokio"))]
 fn main() {
-    eprintln!("re-run with: cargo run --example receive_to_jpeg_tokio --features tokio");
+    eprintln!("rebuild with `--features tokio`");
 }

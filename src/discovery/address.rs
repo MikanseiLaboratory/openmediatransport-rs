@@ -149,16 +149,20 @@ impl OmtAddress {
     }
 
     /// Format as `omt://host[:port][/name]`.
+    ///
+    /// Prefers [`Self::machine_name`] (libomtnet `ToURL` behavior) so the URL
+    /// identifies the advertised host, not a single discovery-time IP that may
+    /// be stale or wrong. Callers that need a TCP endpoint should use
+    /// [`Self::addresses`] (or resolve the host) at connect time.
     pub fn to_url(&self) -> String {
-        let host =
+        let host = if !self.machine_name.is_empty() {
+            self.machine_name.as_str()
+        } else {
             self.addresses
                 .first()
                 .map(String::as_str)
-                .unwrap_or(if self.machine_name.is_empty() {
-                    "127.0.0.1"
-                } else {
-                    self.machine_name.as_str()
-                });
+                .unwrap_or("127.0.0.1")
+        };
         if self.port == 0 {
             format!("{URL_PREFIX}{host}/{}", self.name)
         } else {
@@ -329,5 +333,16 @@ mod tests {
     #[test]
     fn from_dns_sd_rejects_invalid_names() {
         assert!(OmtAddress::from_dns_sd("not-omt._omt._tcp.local.", 6400, vec![]).is_none());
+    }
+
+    #[test]
+    fn to_url_prefers_machine_name_over_ip() {
+        let a = OmtAddress::from_dns_sd(
+            "CAMHOST (Output 1)._omt._tcp.local.",
+            6400,
+            vec!["10.0.0.5".into(), "192.168.1.5".into()],
+        )
+        .unwrap();
+        assert_eq!(a.to_url(), "omt://CAMHOST:6400/Output 1");
     }
 }
