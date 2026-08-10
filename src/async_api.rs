@@ -1,15 +1,17 @@
 //! Tokio-based async API (feature = `tokio`).
 //!
-//! Thin wrappers around the sync sender/receiver. Blocking socket / VMX work uses
-//! [`tokio::task::block_in_place`] so the multi-thread scheduler can continue
-//! serving other tasks. Slice-level codec parallelism stays in `vmx` via rayon.
+//! [`AsyncReceiver`] wraps [`ReceiverSession`] and polls its bounded output
+//! channels without nesting VMX decode on the Tokio worker via `block_in_place`.
 
 use std::time::Duration;
 
 use crate::error::OmtError;
-use crate::receive::{ReceivedFrame, Receiver};
+use crate::receive::{ReceiverConfig, ReceiverSession};
 use crate::send::{Sender, SenderConfig};
-use crate::types::{FrameType, MediaFrame, PreferredVideoFormat, Statistics};
+use crate::types::{
+    DecodedAudioFrame, DecodedVideoFrame, FrameType, MediaFrame, MetadataFrame, SessionStatistics,
+    Statistics,
+};
 
 /// Async sender wrapping the sync [`Sender`] protocol logic.
 #[derive(Debug)]
@@ -74,9 +76,6 @@ impl AsyncSender {
     }
 
     /// Send a video frame asynchronously.
-    ///
-    /// Uses `block_in_place` so sync socket writes do not stall the multi-thread
-    /// scheduler's ability to run other tasks.
     pub async fn send_video(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
         tokio::task::block_in_place(|| self.inner.send_video(frame))
     }
@@ -112,20 +111,26 @@ impl AsyncSender {
     }
 }
 
-/// Async receiver wrapping the sync [`Receiver`] protocol logic.
+/// Async receiver over [`ReceiverSession`].
 pub struct AsyncReceiver {
-    inner: Receiver,
+    inner: ReceiverSession,
 }
 
 impl AsyncReceiver {
-    /// Create an async receiver.
-    pub async fn create(
+    /// Connect an async receiver session.
+    pub async fn connect(
         address: impl Into<String>,
         frame_types: FrameType,
     ) -> Result<Self, OmtError> {
-        Ok(Self {
-            inner: Receiver::create(address, frame_types)?,
-        })
+        let address = address.into();
+        let config = ReceiverConfig {
+            frame_types,
+            ..ReceiverConfig::default()
+        };
+        let inner = tokio::task::spawn_blocking(move || ReceiverSession::connect(address, config))
+            .await
+            .map_err(|e| OmtError::Network(e.to_string()))??;
+        Ok(Self { inner })
     }
 
     /// Connection address.
@@ -138,37 +143,37 @@ impl AsyncReceiver {
         self.inner.frame_types()
     }
 
-    /// Set preferred uncompressed video format.
-    pub fn set_preferred_format(&mut self, format: PreferredVideoFormat) {
-        self.inner.set_preferred_format(format);
+    /// Wait up to `timeout_ms` for the next decoded video frame.
+    pub async fn recv_video(&mut self, timeout_ms: i32) -> Option<DecodedVideoFrame> {
+        let timeout = if timeout_ms < 0 {
+            Duration::from_secs(3600)
+        } else {
+            Duration::from_millis(timeout_ms as u64)
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(frame) = self.inner.try_recv_video() {
+                return Some(frame);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 
-    /// Preferred format.
-    pub fn preferred_format(&self) -> PreferredVideoFormat {
-        self.inner.preferred_format()
+    /// Non-blocking audio poll.
+    pub fn try_recv_audio(&self) -> Option<DecodedAudioFrame> {
+        self.inner.try_recv_audio()
     }
 
-    /// Connect dual TCP sessions (no connect timeout).
-    pub async fn connect(&mut self) -> Result<(), OmtError> {
-        self.inner.connect(None)
-    }
-
-    /// Connect with an optional TCP connect timeout.
-    pub async fn connect_timeout(&mut self, timeout: Option<Duration>) -> Result<(), OmtError> {
-        self.inner.connect(timeout)
-    }
-
-    /// Receive the next frame with a timeout in milliseconds.
-    ///
-    /// VMX decode is CPU-bound; `block_in_place` keeps the Tokio pool healthy
-    /// while the sync receiver runs (same pattern as `spawn_blocking`, without
-    /// requiring `'static` ownership of the receiver).
-    pub async fn receive(&mut self, timeout_ms: i32) -> Result<Option<ReceivedFrame>, OmtError> {
-        tokio::task::block_in_place(|| self.inner.receive(timeout_ms))
+    /// Non-blocking metadata poll.
+    pub fn try_recv_metadata(&self) -> Option<MetadataFrame> {
+        self.inner.try_recv_metadata()
     }
 
     /// Snapshot of receive statistics.
-    pub fn statistics(&self) -> Statistics {
+    pub fn statistics(&self) -> SessionStatistics {
         self.inner.statistics()
     }
 }
