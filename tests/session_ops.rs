@@ -15,15 +15,20 @@ fn wait_subscribed(sender: &mut Sender) {
         thread::sleep(Duration::from_millis(10));
     }
     sender.force_subscribe(true, false, false);
-    // Ensure at least one accept after force, in case subscribe arrived late.
-    for _ in 0..50 {
+    // Ensure at least one accepted peer before sending (Windows CI is slower).
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
         let _ = sender.poll_accept();
         let _ = sender.poll_peer_metadata();
         if sender.connection_count() > 0 {
-            break;
+            return;
         }
         thread::sleep(Duration::from_millis(10));
     }
+    panic!(
+        "sender never accepted a peer; connections={}",
+        sender.connection_count()
+    );
 }
 
 fn encode_pattern(width: i32, height: i32) -> Vec<u8> {
@@ -109,16 +114,27 @@ fn latest_wins_under_slow_consumer() {
         thread::sleep(Duration::from_millis(5));
     }
 
-    let frame = session
-        .recv_video_timeout(Duration::from_secs(5))
-        .unwrap_or_else(|| {
-            panic!(
-                "decoded frame missing; stats={:?} err={:?} state={:?}",
-                session.statistics(),
-                session.last_error(),
-                session.state()
-            )
-        });
+    // Keep accepting while waiting for decode (peer metadata / ACKs).
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut frame = None;
+    while Instant::now() < deadline {
+        let _ = sender.poll_accept();
+        let _ = sender.poll_peer_metadata();
+        if let Some(f) = session.try_recv_video() {
+            frame = Some(f);
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let frame = frame.unwrap_or_else(|| {
+        panic!(
+            "decoded frame missing; stats={:?} err={:?} state={:?} connections={}",
+            session.statistics(),
+            session.last_error(),
+            session.state(),
+            sender.connection_count()
+        )
+    });
     assert!(frame.timestamp > 0);
     let stats = session.statistics();
     assert!(stats.frames_decoded >= 1, "stats={stats:?}");

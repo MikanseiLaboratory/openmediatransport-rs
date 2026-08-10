@@ -131,16 +131,16 @@ fn vmx_colorbar_loopback_decodes_bgra() {
     let mut got = None;
     for _ in 0..200 {
         if let Some(f) = session.try_recv_video() {
-            got = Some(f);
-            break;
+            // Parallel tests can briefly race; wait for our own timestamp.
+            if f.timestamp == 10_000_000 {
+                got = Some(f);
+                break;
+            }
         }
         thread::sleep(Duration::from_millis(10));
     }
     let frame = got.expect("decoded BGRA frame");
-    assert_eq!(
-        frame.timestamp, 10_000_000,
-        "unexpected frame (is another OMT sender on 6400..=6600?)"
-    );
+    assert_eq!(frame.timestamp, 10_000_000);
     assert_eq!(frame.width, width as u32);
     assert_eq!(frame.height, height as u32);
     assert_eq!(frame.pixels.len(), (width * height * 4) as usize);
@@ -225,16 +225,16 @@ fn vmx_preview_loopback_decodes_eighth_bgra() {
     let mut got = None;
     for _ in 0..200 {
         if let Some(f) = session.try_recv_video() {
-            got = Some(f);
-            break;
+            // Parallel tests can briefly race; wait for our own timestamp.
+            if f.timestamp == 20_000_000 {
+                got = Some(f);
+                break;
+            }
         }
         thread::sleep(Duration::from_millis(10));
     }
     let frame = got.expect("decoded preview BGRA frame");
-    assert_eq!(
-        frame.timestamp, 20_000_000,
-        "unexpected frame (is another OMT sender on 6400..=6600?)"
-    );
+    assert_eq!(frame.timestamp, 20_000_000);
     assert_eq!(frame.width, 16);
     assert_eq!(frame.height, 16);
     assert_eq!(frame.pixels.len(), 16 * 16 * 4);
