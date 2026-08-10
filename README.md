@@ -27,7 +27,7 @@ Codec SIMD / rayon details: [`vmx-rs` README](https://github.com/MikanseiLaborat
 
 ## MSRV
 
-**Rust 1.88** (`edition = "2024"`).
+**Rust 1.97** (`edition = "2024"`).
 
 ## Quick start
 

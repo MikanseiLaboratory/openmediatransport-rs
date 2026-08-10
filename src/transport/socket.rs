@@ -45,7 +45,7 @@ pub fn create_tcp_socket(addr: SocketAddr) -> Result<Socket, OmtError> {
     if addr.is_ipv6() {
         let _ = socket.set_only_v6(false);
     }
-    socket.set_nodelay(true)?;
+    socket.set_tcp_nodelay(true)?;
     socket.set_keepalive(true)?;
     let _ = socket.set_send_buffer_size(NETWORK_SEND_BUFFER);
     let _ = socket.set_recv_buffer_size(NETWORK_RECEIVE_BUFFER);

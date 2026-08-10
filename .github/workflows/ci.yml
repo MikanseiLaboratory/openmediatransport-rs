@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: "1.97"
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: "1.97"
           components: clippy
       - name: Checkout vmx-rs sibling
         shell: bash

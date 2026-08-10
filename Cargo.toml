@@ -2,7 +2,7 @@
 name = "openmediatransport"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.97"
 license = "MIT"
 description = "Pure Rust Open Media Transport (OMT) protocol implementation"
 authors = ["MikanseiLaboratory"]
@@ -20,7 +20,7 @@ tokio = ["dep:tokio"]
 thiserror = "2"
 bytes = "1"
 tracing = "0.1"
-socket2 = "0.5"
+socket2 = "0.6"
 mdns-sd = "0.20"
 vmx = { path = "../vmx-rs" }
 tokio = { version = "1", optional = true, features = ["net", "rt", "rt-multi-thread", "sync", "time", "macros", "io-util"] }
