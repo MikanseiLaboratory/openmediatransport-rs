@@ -122,14 +122,26 @@ impl AsyncReceiver {
         address: impl Into<String>,
         frame_types: FrameType,
     ) -> Result<Self, OmtError> {
+        Self::connect_with_addresses(address, &[], frame_types).await
+    }
+
+    /// Connect using a URL plus discovery-time IP candidates.
+    pub async fn connect_with_addresses(
+        address: impl Into<String>,
+        extra_addresses: &[String],
+        frame_types: FrameType,
+    ) -> Result<Self, OmtError> {
         let address = address.into();
+        let extra_addresses = extra_addresses.to_vec();
         let config = ReceiverConfig {
             frame_types,
             ..ReceiverConfig::default()
         };
-        let inner = tokio::task::spawn_blocking(move || ReceiverSession::connect(address, config))
-            .await
-            .map_err(|e| OmtError::Network(e.to_string()))??;
+        let inner = tokio::task::spawn_blocking(move || {
+            ReceiverSession::connect_with_addresses(address, &extra_addresses, config)
+        })
+        .await
+        .map_err(|e| OmtError::Network(e.to_string()))??;
         Ok(Self { inner })
     }
 

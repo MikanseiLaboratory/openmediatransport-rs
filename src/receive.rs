@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver as MpscReceiver, SyncSender, sync_channel, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -14,8 +14,8 @@ use crate::discovery::address::OmtAddress;
 use crate::error::OmtError;
 use crate::protocol::frame::{AssembledFrame, FrameHeader, PROTOCOL_VERSION};
 use crate::protocol::metadata::{
-    SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO, encode_metadata_xml,
-    suggested_quality_xml,
+    PREVIEW_OFF, PREVIEW_ON, SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO,
+    encode_metadata_xml, suggested_quality_xml,
 };
 use crate::transport::channel::Channel;
 use crate::transport::pool::BufferPool;
@@ -57,6 +57,12 @@ pub struct ReceiverConfig {
     pub frame_types: FrameType,
     /// Suggested encode quality sent to the peer.
     pub quality: Quality,
+    /// Request 1/8 preview video (`<OMTSettings Preview="true" />`).
+    ///
+    /// Progressive VMX1 only; decoded frames are BGRA at `width/8 × height/8`
+    /// (width aligned to 2). Interlace / alpha / high-bit-depth preview is not
+    /// supported in this build.
+    pub preview: bool,
     /// TCP connect timeout.
     pub connect_timeout: Duration,
     /// Automatically reconnect after socket failures (250 ms … 2 s backoff).
@@ -68,6 +74,7 @@ impl Default for ReceiverConfig {
         Self {
             frame_types: FrameType::VIDEO | FrameType::AUDIO | FrameType::METADATA,
             quality: Quality::Default,
+            preview: false,
             connect_timeout: Duration::from_secs(5),
             auto_reconnect: true,
         }
@@ -81,6 +88,8 @@ struct WireVideo {
     frame_rate_n: i32,
     frame_rate_d: i32,
     color_space: ColorSpace,
+    /// Wire `VideoFlags::PREVIEW` — decode via `decode_preview_bgra`.
+    preview: bool,
     payload: Vec<u8>,
     metadata: Option<Arc<str>>,
     enqueued_at: Instant,
@@ -193,6 +202,19 @@ pub struct ReceiverSession {
 impl ReceiverSession {
     /// Connect and spawn reader / decoder threads.
     pub fn connect(address: impl Into<String>, config: ReceiverConfig) -> Result<Self, OmtError> {
+        Self::connect_with_addresses(address, &[], config)
+    }
+
+    /// Connect using a URL plus optional discovery-time IP candidates.
+    ///
+    /// Endpoints are tried in order (discovery addresses first, then any host
+    /// resolved from the URL) until one TCP connect succeeds — matching
+    /// libomtnet `BeginConnect(IPAddress[], port)` behavior.
+    pub fn connect_with_addresses(
+        address: impl Into<String>,
+        extra_addresses: &[String],
+        config: ReceiverConfig,
+    ) -> Result<Self, OmtError> {
         let address = address.into();
         if address.is_empty() {
             return Err(OmtError::InvalidArgument(
@@ -200,19 +222,12 @@ impl ReceiverSession {
             ));
         }
         let parsed = OmtAddress::from_url(&address)?;
-        let host = parsed
-            .addresses
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".into());
         if parsed.port == 0 {
             return Err(OmtError::InvalidArgument(
                 "receiver URL must include a port".into(),
             ));
         }
-        let addr: SocketAddr = format!("{host}:{}", parsed.port)
-            .parse()
-            .map_err(|e| OmtError::InvalidArgument(format!("bad address: {e}")))?;
+        let endpoints = resolve_endpoints(&parsed, extra_addresses)?;
 
         let want_video = config.frame_types.contains(FrameType::VIDEO)
             || config.frame_types.contains(FrameType::METADATA)
@@ -223,19 +238,27 @@ impl ReceiverSession {
         let mut initial_video = None;
         let mut initial_audio = None;
         if want_video {
-            let mut stream = connect(addr, Some(config.connect_timeout))?;
+            let (mut stream, _) = connect_first(&endpoints, Some(config.connect_timeout))?;
             send_subscriptions(
                 Some(&mut stream),
                 None,
                 config.frame_types,
                 config.quality,
+                config.preview,
                 false,
             )?;
             initial_video = Some(stream);
         }
         if want_audio {
-            let mut stream = connect(addr, Some(config.connect_timeout))?;
-            send_subscriptions(None, Some(&mut stream), config.frame_types, config.quality, false)?;
+            let (mut stream, _) = connect_first(&endpoints, Some(config.connect_timeout))?;
+            send_subscriptions(
+                None,
+                Some(&mut stream),
+                config.frame_types,
+                config.quality,
+                false,
+                false,
+            )?;
             initial_audio = Some(stream);
         }
 
@@ -267,6 +290,7 @@ impl ReceiverSession {
         if let Some(stream) = initial_video {
             let shared_c = Arc::clone(&shared);
             let cfg = config.clone();
+            let endpoints = endpoints.clone();
             let video_wire_tx = video_wire_tx.clone();
             let metadata_tx = metadata_tx.clone();
             let audio_on_av = audio_tx.clone();
@@ -275,7 +299,7 @@ impl ReceiverSession {
                     .name("omt-rx-video-io".into())
                     .spawn(move || {
                         socket_supervisor(
-                            addr,
+                            endpoints,
                             cfg,
                             shared_c,
                             SocketRole::Video {
@@ -294,13 +318,14 @@ impl ReceiverSession {
         if let Some(stream) = initial_audio {
             let shared_c = Arc::clone(&shared);
             let cfg = config.clone();
+            let endpoints = endpoints.clone();
             let audio_tx = audio_tx.clone();
             joins.push(
                 thread::Builder::new()
                     .name("omt-rx-audio-io".into())
                     .spawn(move || {
                         socket_supervisor(
-                            addr,
+                            endpoints,
                             cfg,
                             shared_c,
                             SocketRole::Audio { audio_tx },
@@ -323,6 +348,14 @@ impl ReceiverSession {
             metadata_rx,
             joins,
         })
+    }
+
+    /// Connect using a discovered [`OmtAddress`] (URL + all candidate IPs).
+    pub fn connect_from_address(
+        addr: &OmtAddress,
+        config: ReceiverConfig,
+    ) -> Result<Self, OmtError> {
+        Self::connect_with_addresses(addr.to_url(), &addr.addresses, config)
     }
 
     /// Connection address string.
@@ -424,7 +457,7 @@ enum SocketRole {
 }
 
 fn socket_supervisor(
-    addr: SocketAddr,
+    endpoints: Vec<SocketAddr>,
     config: ReceiverConfig,
     shared: Arc<Shared>,
     role: SocketRole,
@@ -451,8 +484,8 @@ fn socket_supervisor(
             }
             use_primed = false;
             shared.set_state(SessionState::Connecting);
-            match connect(addr, Some(config.connect_timeout)) {
-                Ok(s) => s,
+            match connect_first(&endpoints, Some(config.connect_timeout)) {
+                Ok((s, _)) => s,
                 Err(e) => {
                     shared.set_error(format!("connect failed: {e}"));
                     if !config.auto_reconnect {
@@ -512,6 +545,106 @@ fn socket_supervisor(
     }
 }
 
+/// Build TCP endpoints from URL host + discovery-time address candidates.
+fn resolve_endpoints(
+    parsed: &OmtAddress,
+    extra_addresses: &[String],
+) -> Result<Vec<SocketAddr>, OmtError> {
+    let port = parsed.port;
+    let mut hosts: Vec<String> = Vec::new();
+    for host in extra_addresses.iter().chain(parsed.addresses.iter()) {
+        let host = host.trim();
+        if host.is_empty() {
+            continue;
+        }
+        if !hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+            hosts.push(host.to_string());
+        }
+    }
+    if hosts.is_empty() {
+        return Err(OmtError::InvalidArgument(
+            "receiver URL has no host addresses".into(),
+        ));
+    }
+
+    let mut endpoints: Vec<SocketAddr> = Vec::new();
+    for host in &hosts {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            let addr = SocketAddr::new(ip, port);
+            if !endpoints.contains(&addr) {
+                endpoints.push(addr);
+            }
+            continue;
+        }
+        match (host.as_str(), port).to_socket_addrs() {
+            Ok(iter) => {
+                for addr in iter {
+                    if !endpoints.contains(&addr) {
+                        endpoints.push(addr);
+                    }
+                }
+            }
+            Err(e) => {
+                // Keep going — another candidate may still work.
+                let _ = e;
+            }
+        }
+    }
+
+    if endpoints.is_empty() {
+        return Err(OmtError::InvalidArgument(format!(
+            "could not resolve receiver host(s): {}",
+            hosts.join(", ")
+        )));
+    }
+
+    // Prefer ordinary IPv4, then 172.*, then IPv6 / link-local / loopback.
+    endpoints.sort_by_key(endpoint_preference);
+    Ok(endpoints)
+}
+
+fn endpoint_preference(addr: &SocketAddr) -> u8 {
+    match addr.ip() {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            if v4.is_loopback() {
+                5
+            } else if o[0] == 169 && o[1] == 254 {
+                4
+            } else if o[0] == 172 {
+                1
+            } else {
+                0
+            }
+        }
+        std::net::IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                5
+            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                4
+            } else {
+                3
+            }
+        }
+    }
+}
+
+fn connect_first(
+    endpoints: &[SocketAddr],
+    timeout: Option<Duration>,
+) -> Result<(TcpStream, SocketAddr), OmtError> {
+    let mut last_err: Option<OmtError> = None;
+    for addr in endpoints {
+        match connect(*addr, timeout) {
+            Ok(stream) => return Ok((stream, *addr)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        OmtError::Network("connect failed: no endpoints available".into())
+    }))
+}
+
 fn subscribe_socket(
     stream: &TcpStream,
     config: &ReceiverConfig,
@@ -525,6 +658,7 @@ fn subscribe_socket(
                 None,
                 config.frame_types,
                 config.quality,
+                config.preview,
                 *decode_audio,
             )?;
         }
@@ -534,6 +668,7 @@ fn subscribe_socket(
                 Some(&mut stream),
                 config.frame_types,
                 config.quality,
+                false,
                 false,
             )?;
         }
@@ -559,6 +694,7 @@ fn send_subscriptions(
     meta: Option<&mut TcpStream>,
     frame_types: FrameType,
     quality: Quality,
+    preview: bool,
     include_audio_on_av: bool,
 ) -> Result<(), OmtError> {
     let quality_xml = suggested_quality_xml(quality);
@@ -566,7 +702,9 @@ fn send_subscriptions(
         if frame_types.contains(FrameType::VIDEO) || frame_types.contains(FrameType::METADATA) {
             write_metadata_frame(stream, SUBSCRIBE_METADATA)?;
         }
+        // libomtnet order: optional Preview settings, then SubscribeVideo + quality.
         if frame_types.contains(FrameType::VIDEO) {
+            write_metadata_frame(stream, if preview { PREVIEW_ON } else { PREVIEW_OFF })?;
             write_metadata_frame(stream, SUBSCRIBE_VIDEO)?;
             write_metadata_frame(stream, &quality_xml)?;
         }
@@ -633,9 +771,7 @@ fn record_codec_time(stats: &Mutex<SessionStatistics>, ns: u64, age_us: u64) {
         g.codec_time_ns = g.codec_time_ns.saturating_add(ns);
         g.frames_decoded = g.frames_decoded.saturating_add(1);
         // Ignore cold-start frames when tracking peak (thread-pool / cache warmup).
-        if g.frames_decoded <= 30 {
-            g.codec_time_ns_peak = ns;
-        } else if ns > g.codec_time_ns_peak {
+        if g.frames_decoded <= 30 || ns > g.codec_time_ns_peak {
             g.codec_time_ns_peak = ns;
         }
         if age_us > g.frame_age_us_peak {
@@ -749,7 +885,7 @@ fn dispatch_av_frame(
     } else {
         crate::protocol::metadata::decode_metadata_xml(&frame.metadata)
             .ok()
-            .map(|s| Arc::<str>::from(s))
+            .map(Arc::<str>::from)
     };
 
     if frame.header.frame_type.contains(FrameType::VIDEO) {
@@ -761,10 +897,8 @@ fn dispatch_av_frame(
             record_drop_wire(&shared.stats);
             return;
         }
-        if v.flags.contains(VideoFlags::PREVIEW)
-            || v.flags.contains(VideoFlags::ALPHA)
-            || v.flags.contains(VideoFlags::HIGH_BIT_DEPTH)
-        {
+        // Preview is decoded via decode_preview_bgra; alpha / HBD still unsupported.
+        if v.flags.contains(VideoFlags::ALPHA) || v.flags.contains(VideoFlags::HIGH_BIT_DEPTH) {
             record_drop_wire(&shared.stats);
             return;
         }
@@ -782,6 +916,7 @@ fn dispatch_av_frame(
             frame_rate_n: v.frame_rate_n,
             frame_rate_d: v.frame_rate_d.max(1),
             color_space: v.color_space,
+            preview: v.flags.contains(VideoFlags::PREVIEW),
             payload,
             metadata: meta,
             enqueued_at: Instant::now(),
@@ -892,6 +1027,7 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
             frame_rate_n,
             frame_rate_d,
             color_space,
+            preview,
             payload,
             metadata,
             ..
@@ -903,6 +1039,7 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
             timestamp,
             frame_rate_n,
             frame_rate_d,
+            preview,
             metadata,
             payload.as_slice(),
             &mut codec,
@@ -923,6 +1060,7 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_vmx_bgra(
     width: i32,
     height: i32,
@@ -930,6 +1068,7 @@ fn decode_vmx_bgra(
     timestamp: i64,
     frame_rate_n: i32,
     frame_rate_d: i32,
+    preview: bool,
     metadata: Option<Arc<str>>,
     payload: &[u8],
     cached: &mut Option<vmx::Codec>,
@@ -961,14 +1100,24 @@ fn decode_vmx_bgra(
         }
         let codec = cached.as_mut().unwrap();
         codec.load_from(payload)?;
-        let stride = (width as usize) * 4;
-        let need = stride * height as usize;
+        let (out_w, out_h) = if preview {
+            let ps = codec.preview_size();
+            (ps.width as u32, ps.height as u32)
+        } else {
+            (width as u32, height as u32)
+        };
+        let stride = (out_w as usize) * 4;
+        let need = stride * out_h as usize;
         decode_buf.resize(need, 0);
-        codec.decode_bgra(decode_buf, stride)?;
+        if preview {
+            codec.decode_preview_bgra(decode_buf, stride)?;
+        } else {
+            codec.decode_bgra(decode_buf, stride)?;
+        }
         let pixels: Arc<[u8]> = Arc::from(decode_buf.as_slice());
         Ok::<_, OmtError>(DecodedVideoFrame {
-            width: width as u32,
-            height: height as u32,
+            width: out_w,
+            height: out_h,
             stride: stride as u32,
             timestamp,
             frame_rate_n,

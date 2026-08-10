@@ -20,19 +20,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&out_dir)?;
 
-    let url = match url_arg {
-        Some(u) if u.starts_with("omt://") => u,
+    let (url, addresses) = match url_arg {
+        Some(u) if u.starts_with("omt://") => (u, Vec::new()),
         Some(other) => {
             eprintln!("Unexpected argument (expected omt:// URL): {other}");
             std::process::exit(2);
         }
-        None => tokio::task::spawn_blocking(discover_first_url)
+        None => tokio::task::spawn_blocking(discover_first)
             .await?
             .map_err(|e| -> Box<dyn std::error::Error> { e })?,
     };
 
     println!("Connecting to {url}");
-    let mut receiver = AsyncReceiver::connect(&url, FrameType::VIDEO).await?;
+    let mut receiver =
+        AsyncReceiver::connect_with_addresses(&url, &addresses, FrameType::VIDEO).await?;
     println!("Connected; waiting for video frames…");
 
     let mut saved = 0usize;
@@ -74,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(feature = "tokio")]
-fn discover_first_url() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+fn discover_first() -> Result<(String, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
     use std::time::Duration;
 
     use openmediatransport::Discovery;
@@ -85,14 +86,15 @@ fn discover_first_url() -> Result<String, Box<dyn std::error::Error + Send + Syn
     println!("Discovered {} source(s)", sources.len());
     for src in sources {
         println!(
-            "  - {} port={} url={}",
+            "  - {} port={} url={} addrs={:?}",
             src.instance_name(),
             src.port,
-            src.to_url()
+            src.to_url(),
+            src.addresses
         );
     }
     let first = sources.first().ok_or("no OMT sources discovered")?;
-    Ok(first.to_url())
+    Ok((first.to_url(), first.addresses.clone()))
 }
 
 #[cfg(feature = "tokio")]
@@ -116,5 +118,5 @@ fn bgra_to_rgb(
 
 #[cfg(not(feature = "tokio"))]
 fn main() {
-    eprintln!("re-run with: cargo run --example receive_to_jpeg_tokio --features tokio");
+    eprintln!("rebuild with `--features tokio`");
 }

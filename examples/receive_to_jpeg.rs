@@ -18,18 +18,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&out_dir)?;
 
-    let url = match url_arg {
-        Some(u) if u.starts_with("omt://") => u,
+    let (url, addresses) = match url_arg {
+        Some(u) if u.starts_with("omt://") => (u, Vec::new()),
         Some(other) => {
             eprintln!("Unexpected argument (expected omt:// URL): {other}");
             std::process::exit(2);
         }
-        None => discover_first_url()?,
+        None => discover_first()?,
     };
 
     println!("Connecting to {url}");
-    let session = ReceiverSession::connect(
+    let session = ReceiverSession::connect_with_addresses(
         &url,
+        &addresses,
         ReceiverConfig {
             frame_types: FrameType::VIDEO,
             connect_timeout: Duration::from_secs(5),
@@ -79,21 +80,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn discover_first_url() -> Result<String, Box<dyn std::error::Error>> {
+fn discover_first() -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
     let mut discovery = Discovery::new()?;
     discovery.refresh_for(Duration::from_secs(3))?;
     let sources = discovery.sources();
     println!("Discovered {} source(s)", sources.len());
     for src in sources {
         println!(
-            "  - {} port={} url={}",
+            "  - {} port={} url={} addrs={:?}",
             src.instance_name(),
             src.port,
-            src.to_url()
+            src.to_url(),
+            src.addresses
         );
     }
     let first = sources.first().ok_or("no OMT sources discovered")?;
-    Ok(first.to_url())
+    Ok((first.to_url(), first.addresses.clone()))
 }
 
 fn bgra_to_rgb(
