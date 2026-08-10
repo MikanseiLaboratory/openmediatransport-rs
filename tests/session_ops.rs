@@ -1,8 +1,6 @@
 //! Session lifecycle: shutdown join, stats, and reconnect interrupt.
 
-use openmediatransport::{
-    Codec, FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender,
-};
+use openmediatransport::{Codec, FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 use vmx::{Codec as VmxCodec, Config as VmxConfig, Profile};

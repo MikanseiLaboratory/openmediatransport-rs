@@ -7,8 +7,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use openmediatransport::async_api::AsyncReceiver;
     use openmediatransport::FrameType;
+    use openmediatransport::async_api::AsyncReceiver;
 
     let mut args = env::args().skip(1);
     let url_arg = args.next();
@@ -42,23 +42,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     while saved < max_frames && Instant::now() < deadline {
         attempts += 1;
-        match receiver.recv_video(500).await {
-            Some(frame) => {
-                println!(
-                    "frame#{attempts}: {}x{} pixels={} ts={}",
-                    frame.width,
-                    frame.height,
-                    frame.pixels.len(),
-                    frame.timestamp
-                );
-                let rgb = bgra_to_rgb(&frame.pixels, frame.width, frame.height)?;
-                let path = out_dir.join(format!("frame_{saved:03}.jpg"));
-                let path_clone = path.clone();
-                tokio::task::spawn_blocking(move || rgb.save(&path_clone)).await??;
-                println!("  wrote {}", path.display());
-                saved += 1;
-            }
-            None => {}
+        if let Some(frame) = receiver.recv_video(500).await {
+            println!(
+                "frame#{attempts}: {}x{} pixels={} ts={}",
+                frame.width,
+                frame.height,
+                frame.pixels.len(),
+                frame.timestamp
+            );
+            let rgb = bgra_to_rgb(&frame.pixels, frame.width, frame.height)?;
+            let path = out_dir.join(format!("frame_{saved:03}.jpg"));
+            let path_clone = path.clone();
+            tokio::task::spawn_blocking(move || rgb.save(&path_clone)).await??;
+            println!("  wrote {}", path.display());
+            saved += 1;
         }
     }
 

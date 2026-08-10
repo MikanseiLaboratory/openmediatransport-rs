@@ -173,7 +173,10 @@ mod tests {
         ch.push_bytes(&hdr);
         let err = ch.try_pop_frame().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("exceeds max") || msg.contains("protocol"), "{msg}");
+        assert!(
+            msg.contains("exceeds max") || msg.contains("protocol"),
+            "{msg}"
+        );
     }
 
     #[test]

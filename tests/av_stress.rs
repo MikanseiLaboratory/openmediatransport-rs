@@ -1,16 +1,13 @@
 //! Audio continues while video decode is busy.
 
-use openmediatransport::{
-    Codec, FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender,
-};
+use openmediatransport::{Codec, FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 use vmx::{Codec as VmxCodec, Config as VmxConfig, Profile};
 
 #[test]
 fn audio_independent_of_video_decode() {
-    let mut sender =
-        Sender::create("AvSrc", FrameType::VIDEO | FrameType::AUDIO).expect("sender");
+    let mut sender = Sender::create("AvSrc", FrameType::VIDEO | FrameType::AUDIO).expect("sender");
     let url = format!("omt://127.0.0.1:{}", sender.port());
     let session = ReceiverSession::connect(
         url,

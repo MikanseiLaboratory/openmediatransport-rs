@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver as MpscReceiver, SyncSender, sync_channel, TrySendError};
+use std::sync::mpsc::{Receiver as MpscReceiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -379,11 +379,7 @@ impl ReceiverSession {
 
     /// Last transport / decode error message, if any.
     pub fn last_error(&self) -> Option<String> {
-        self.shared
-            .last_error
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
+        self.shared.last_error.lock().ok().and_then(|g| g.clone())
     }
 
     /// Non-blocking poll for the next decoded video frame (latest-wins slot).
@@ -408,12 +404,7 @@ impl ReceiverSession {
 
     /// Snapshot of session statistics (includes live queue depths).
     pub fn statistics(&self) -> SessionStatistics {
-        let mut s = self
-            .shared
-            .stats
-            .lock()
-            .map(|g| *g)
-            .unwrap_or_default();
+        let mut s = self.shared.stats.lock().map(|g| *g).unwrap_or_default();
         s.wire_queue_depth = self.shared.wire_depth.load(Ordering::Relaxed);
         s.decoded_queue_depth = self.shared.video.depth.load(Ordering::Relaxed);
         s
@@ -498,9 +489,7 @@ fn socket_supervisor(
 
         let is_reconnect = !use_primed;
         use_primed = false;
-        if is_reconnect
-            && let Err(e) = subscribe_socket(&stream, &config, &role)
-        {
+        if is_reconnect && let Err(e) = subscribe_socket(&stream, &config, &role) {
             shared.set_error(format!("subscribe failed: {e}"));
             if !config.auto_reconnect {
                 break;
@@ -640,9 +629,8 @@ fn connect_first(
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err.unwrap_or_else(|| {
-        OmtError::Network("connect failed: no endpoints available".into())
-    }))
+    Err(last_err
+        .unwrap_or_else(|| OmtError::Network("connect failed: no endpoints available".into())))
 }
 
 fn subscribe_socket(
@@ -972,7 +960,10 @@ fn dispatch_av_frame(
     }
 }
 
-fn decode_audio_frame(frame: AssembledFrame, pcm_scratch: &mut Vec<u8>) -> Option<DecodedAudioFrame> {
+fn decode_audio_frame(
+    frame: AssembledFrame,
+    pcm_scratch: &mut Vec<u8>,
+) -> Option<DecodedAudioFrame> {
     let a = frame.audio?;
     if a.codec != Codec::Fpa1 {
         return None;
@@ -1009,9 +1000,11 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
     while !shared.stop.load(Ordering::Acquire) {
         let wire = match wire_rx.recv_timeout(Duration::from_millis(20)) {
             Ok(w) => {
-                let _ = shared.wire_depth.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    Some(v.saturating_sub(1))
-                });
+                let _ = shared
+                    .wire_depth
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                        Some(v.saturating_sub(1))
+                    });
                 w
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,

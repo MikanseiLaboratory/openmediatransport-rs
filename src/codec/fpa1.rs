@@ -100,7 +100,13 @@ pub fn decode_planar(
     active_channels: u32,
 ) -> Result<Vec<Vec<f32>>, OmtError> {
     let mut flat = Vec::new();
-    decode_planar_into(data, channels, samples_per_channel, active_channels, &mut flat)?;
+    decode_planar_into(
+        data,
+        channels,
+        samples_per_channel,
+        active_channels,
+        &mut flat,
+    )?;
     let mut planes = Vec::with_capacity(channels);
     for i in 0..channels {
         let mut plane = Vec::with_capacity(samples_per_channel);

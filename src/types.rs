@@ -471,4 +471,3 @@ impl SessionStatistics {
         self.bytes_received_since_last = 0;
     }
 }
-

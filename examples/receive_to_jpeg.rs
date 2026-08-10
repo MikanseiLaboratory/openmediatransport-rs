@@ -45,22 +45,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     while saved < max_frames && Instant::now() < deadline {
         attempts += 1;
-        match session.recv_video_timeout(Duration::from_millis(500)) {
-            Some(frame) => {
-                println!(
-                    "frame#{attempts}: {}x{} pixels={} ts={}",
-                    frame.width,
-                    frame.height,
-                    frame.pixels.len(),
-                    frame.timestamp
-                );
-                let rgb = bgra_to_rgb(&frame.pixels, frame.width, frame.height)?;
-                let path = out_dir.join(format!("frame_{saved:03}.jpg"));
-                rgb.save(&path)?;
-                println!("  wrote {}", path.display());
-                saved += 1;
-            }
-            None => {}
+        if let Some(frame) = session.recv_video_timeout(Duration::from_millis(500)) {
+            println!(
+                "frame#{attempts}: {}x{} pixels={} ts={}",
+                frame.width,
+                frame.height,
+                frame.pixels.len(),
+                frame.timestamp
+            );
+            let rgb = bgra_to_rgb(&frame.pixels, frame.width, frame.height)?;
+            let path = out_dir.join(format!("frame_{saved:03}.jpg"));
+            rgb.save(&path)?;
+            println!("  wrote {}", path.display());
+            saved += 1;
         }
     }
 

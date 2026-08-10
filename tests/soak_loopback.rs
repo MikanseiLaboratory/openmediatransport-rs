@@ -3,9 +3,7 @@
 //! Default duration is short for CI (`OMT_SOAK_SECS`, default 5).
 //! For the plan gate, run: `OMT_SOAK_SECS=600 cargo test --release --test soak_loopback -- --nocapture`
 
-use openmediatransport::{
-    Codec, FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender,
-};
+use openmediatransport::{Codec, FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender};
 use std::env;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -149,10 +147,7 @@ fn loopback_1080p_60000_1001_soak() {
     // Debug builds are not performance-gated (decode is ~10× slower without LTO).
     let release = cfg!(not(debug_assertions));
     if secs >= 600 && release {
-        assert!(
-            fps >= 59.0,
-            "10-minute soak fps {fps:.2} below 59.0"
-        );
+        assert!(fps >= 59.0, "10-minute soak fps {fps:.2} below 59.0");
         assert!(
             stats.frames_dropped_wire == 0 && stats.frames_dropped_decode == 0,
             "unexpected drops under normal load: {stats:?}"
@@ -162,9 +157,15 @@ fn loopback_1080p_60000_1001_soak() {
             "decode peak {decode_p99_ms:.3} ms > 12 ms"
         );
     } else if release {
-        assert!(fps >= 50.0, "short release soak fps unexpectedly low: {fps:.2}");
+        assert!(
+            fps >= 50.0,
+            "short release soak fps unexpectedly low: {fps:.2}"
+        );
     } else {
-        assert!(received >= 10, "debug soak received too few frames: {received}");
+        assert!(
+            received >= 10,
+            "debug soak received too few frames: {received}"
+        );
     }
 }
 
