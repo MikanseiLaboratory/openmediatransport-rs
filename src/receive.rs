@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::codec::fpa1;
 use crate::discovery::address::OmtAddress;
@@ -28,9 +28,10 @@ pub struct Receiver {
     suggested_quality: Quality,
     stats: Statistics,
     av_stream: Option<TcpStream>,
+    /// Second TCP session used for audio when video is also requested (libomtnet layout).
     meta_stream: Option<TcpStream>,
     av_channel: Channel,
-    #[allow(dead_code)]
+    /// Reassembly buffer for the dedicated audio socket.
     meta_channel: Channel,
     subscribed: bool,
     /// Cached VMX decoder; reused while `codec.size()` matches the frame.
@@ -60,7 +61,7 @@ impl Receiver {
             av_stream: None,
             meta_stream: None,
             av_channel: Channel::new(FrameType::VIDEO | FrameType::AUDIO),
-            meta_channel: Channel::new(FrameType::METADATA),
+            meta_channel: Channel::new(FrameType::AUDIO),
             subscribed: false,
             vmx_codec: None,
             vmx_decode_buf: Vec::new(),
@@ -180,8 +181,11 @@ impl Receiver {
     }
 
     /// Receive the next frame, reconnecting on hard errors when possible.
+    ///
+    /// When a dedicated audio socket is open, both sockets are polled so audio
+    /// frames are not starved behind video.
     pub fn receive(&mut self, timeout_ms: i32) -> Result<Option<ReceivedFrame>, OmtError> {
-        if self.av_stream.is_none() {
+        if self.av_stream.is_none() && self.meta_stream.is_none() {
             let t = if timeout_ms < 0 {
                 None
             } else {
@@ -193,67 +197,104 @@ impl Receiver {
         let deadline = if timeout_ms < 0 {
             None
         } else {
-            Some(std::time::Instant::now() + Duration::from_millis(timeout_ms as u64))
+            Some(Instant::now() + Duration::from_millis(timeout_ms as u64))
         };
 
         loop {
-            let Some(stream) = self.av_stream.as_mut() else {
+            if self.av_stream.is_none() && self.meta_stream.is_none() {
                 return Ok(None);
-            };
-
-            if let Some(deadline) = deadline {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    return Ok(None);
-                }
-                // Short socket waits so we can reassemble large frames across multiple reads.
-                let slice = remaining
-                    .min(Duration::from_millis(50))
-                    .max(Duration::from_millis(1));
-                let _ = stream.set_read_timeout(Some(slice));
-            } else {
-                let _ = stream.set_read_timeout(None);
             }
 
-            match self.av_channel.recv_frame(stream) {
-                Ok(Some(frame)) => {
-                    let nbytes = frame.to_bytes().len();
-                    self.stats.record_received(nbytes);
-                    return Ok(Some(decode_received(
-                        frame,
-                        self.flags,
-                        self.preferred_format,
-                        &mut self.vmx_codec,
-                        &mut self.vmx_decode_buf,
-                    )?));
-                }
-                Ok(None) => {
-                    self.av_stream = None;
-                    self.meta_stream = None;
-                    self.subscribed = false;
-                    return Ok(None);
-                }
-                Err(OmtError::Io(ref e))
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    if deadline.is_none() {
-                        continue;
+            // Drain audio first (short poll) so tones stay live under video load.
+            match self.poll_one(true, Duration::from_millis(1))? {
+                Some(frame) => return Ok(Some(frame)),
+                None => {}
+            }
+
+            let slice = match deadline {
+                Some(d) => {
+                    let remaining = d.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Ok(None);
                     }
-                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    remaining
+                        .min(Duration::from_millis(50))
+                        .max(Duration::from_millis(1))
+                }
+                None => Duration::from_millis(50),
+            };
+
+            match self.poll_one(false, slice)? {
+                Some(frame) => return Ok(Some(frame)),
+                None => {
+                    if deadline.is_some_and(|d| Instant::now() >= d) {
                         return Ok(None);
                     }
                 }
-                Err(OmtError::Network(_)) | Err(OmtError::Io(_)) => {
-                    self.av_stream = None;
-                    self.meta_stream = None;
-                    self.subscribed = false;
-                    return Ok(None);
-                }
-                Err(e) => return Err(e),
             }
+        }
+    }
+
+    /// Poll either the audio (`meta`) or A/V socket once.
+    ///
+    /// Returns `Ok(Some(frame))` on success, `Ok(None)` on idle/timeout, and
+    /// clears both streams when a socket closes.
+    fn poll_one(
+        &mut self,
+        audio: bool,
+        timeout: Duration,
+    ) -> Result<Option<ReceivedFrame>, OmtError> {
+        if audio {
+            if self.meta_stream.is_none() {
+                return Ok(None);
+            }
+        } else if self.av_stream.is_none() {
+            return Ok(None);
+        }
+
+        let result = if audio {
+            let stream = self.meta_stream.as_mut().unwrap();
+            let _ = stream.set_read_timeout(Some(timeout));
+            self.meta_channel.recv_frame(stream)
+        } else {
+            let stream = self.av_stream.as_mut().unwrap();
+            let _ = stream.set_read_timeout(Some(timeout));
+            self.av_channel.recv_frame(stream)
+        };
+
+        match result {
+            Ok(Some(frame)) => {
+                let nbytes = frame.to_bytes().len();
+                self.stats.record_received(nbytes);
+                Ok(Some(decode_received(
+                    frame,
+                    self.flags,
+                    self.preferred_format,
+                    &mut self.vmx_codec,
+                    &mut self.vmx_decode_buf,
+                )?))
+            }
+            Ok(None) => {
+                self.av_stream = None;
+                self.meta_stream = None;
+                self.subscribed = false;
+                Ok(None)
+            }
+            Err(OmtError::Io(ref e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(OmtError::Network(_)) | Err(OmtError::Io(_)) => {
+                self.av_stream = None;
+                self.meta_stream = None;
+                self.subscribed = false;
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
     }
 
