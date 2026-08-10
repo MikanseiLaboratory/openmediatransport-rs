@@ -34,7 +34,6 @@ jobs:
           components: clippy
       - name: Checkout vmx-rs sibling
         shell: bash
-        # Preview APIs land via PR; pin the matching feature branch until merged to main.
-        run: git clone --depth 1 --branch perf/1080p59-receive-optimize https://github.com/MikanseiLaboratory/vmx-rs.git "${GITHUB_WORKSPACE}/../vmx-rs"
+        run: git clone --depth 1 https://github.com/MikanseiLaboratory/vmx-rs.git "${GITHUB_WORKSPACE}/../vmx-rs"
       - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
       - run: cargo test --tests ${{ matrix.features }}
