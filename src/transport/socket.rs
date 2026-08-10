@@ -53,9 +53,12 @@ pub fn create_tcp_socket(addr: SocketAddr) -> Result<Socket, OmtError> {
 }
 
 /// Bind and listen on `addr`.
+///
+/// Does **not** enable `SO_REUSEADDR`. On Windows that option allows multiple
+/// sockets to bind the same port and steal accepts — which breaks parallel
+/// tests (and production senders) sharing 6400..=6600.
 pub fn listen(addr: SocketAddr) -> Result<Socket, OmtError> {
     let socket = create_tcp_socket(addr)?;
-    socket.set_reuse_address(true)?;
     socket.bind(&addr.into())?;
     socket.listen(128)?;
     Ok(socket)
