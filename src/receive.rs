@@ -206,9 +206,8 @@ impl Receiver {
             }
 
             // Drain audio first (short poll) so tones stay live under video load.
-            match self.poll_one(true, Duration::from_millis(1))? {
-                Some(frame) => return Ok(Some(frame)),
-                None => {}
+            if let Some(frame) = self.poll_one(true, Duration::from_millis(1))? {
+                return Ok(Some(frame));
             }
 
             let slice = match deadline {
