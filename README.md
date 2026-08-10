@@ -1,5 +1,7 @@
 # openmediatransport-rs
 
+[![CI](https://github.com/MikanseiLaboratory/openmediatransport-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/openmediatransport-rs/actions/workflows/ci.yml)
+
 Pure Rust implementation of **Open Media Transport (OMT)** — video, audio, and metadata over TCP with DNS-SD discovery.
 
 Depends on [`vmx-rs`](../vmx-rs) for the VMX1 video codec. No Bonjour, Avahi, .NET, or native libomtnet linkage.
