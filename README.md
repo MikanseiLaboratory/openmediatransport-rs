@@ -20,7 +20,7 @@ Depends on [`vmx-rs`](../vmx-rs) for the VMX1 video codec. No Bonjour, Avahi, .N
 
 | Feature | Description |
 |---------|-------------|
-| *(default)* | Sync `Sender` / `Receiver` / `Discovery` |
+| *(default)* | Sync `Sender` / `ReceiverSession` / `Discovery` |
 | `tokio` | Async wrappers (`AsyncSender` / `AsyncReceiver` over `ReceiverSession`) |
 
 Codec SIMD / rayon details: [`vmx-rs` README](https://github.com/MikanseiLaboratory/vmx-rs).

@@ -132,51 +132,6 @@ pub enum ColorSpace {
     Bt709 = 709,
 }
 
-/// Preferred uncompressed video format on receive.
-///
-/// Deprecated: [`ReceiverSession`](crate::ReceiverSession) always decodes VMX1 to BGRA.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[deprecated(note = "ReceiverSession always outputs BGRA; this enum is ignored")]
-pub enum PreferredVideoFormat {
-    /// Always UYVY.
-    #[default]
-    Uyvy = 0,
-    /// UYVY, or BGRA when alpha is present.
-    UyvyOrBgra = 1,
-    /// Always BGRA.
-    Bgra = 2,
-    /// UYVY, or UYVA when alpha is present.
-    UyvyOrUyva = 3,
-    /// Prefer high-bit-depth when available.
-    UyvyOrUyvaOrP216OrPa16 = 4,
-    /// Always P216.
-    P216 = 5,
-}
-
-/// Receiver feature flags.
-///
-/// Deprecated: preview / compressed-only receive modes are not supported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[deprecated(note = "ReceiverSession does not support preview/compressed-only flags")]
-pub struct ReceiveFlags(pub u32);
-
-#[allow(deprecated)]
-impl ReceiveFlags {
-    /// No flags.
-    pub const NONE: Self = Self(0);
-    /// Preview only.
-    pub const PREVIEW: Self = Self(1);
-    /// Include compressed copy.
-    pub const INCLUDE_COMPRESSED: Self = Self(2);
-    /// Compressed only (no decode).
-    pub const COMPRESSED_ONLY: Self = Self(4);
-
-    /// Returns true if `other` bits are set.
-    pub const fn contains(self, other: Self) -> bool {
-        (self.0 & other.0) == other.0
-    }
-}
-
 /// Video encoding quality suggestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(i32)]
