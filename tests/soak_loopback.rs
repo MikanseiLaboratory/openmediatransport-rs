@@ -143,7 +143,7 @@ fn loopback_1080p_60000_1001_soak() {
     session.disconnect();
 
     assert!(received > 0, "no frames received");
-    // Soft gate for short CI soaks; full 600s gate documented in BENCHMARK.md.
+    // Soft gate for short CI soaks; full 600s gate is release-only below.
     // Debug builds are not performance-gated (decode is ~10× slower without LTO).
     let release = cfg!(not(debug_assertions));
     if secs >= 600 && release {
