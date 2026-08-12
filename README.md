@@ -24,6 +24,9 @@ Pure Rust implementation of **Open Media Transport (OMT)** — video, audio, and
 | `tokio` | Async wrappers (`AsyncSender` / `AsyncReceiver` over `ReceiverSession`) |
 
 Codec SIMD / rayon details: [`vmx-rs` README](https://github.com/MikanseiLaboratory/vmx-rs).
+Callers can inspect the selected VMX path via `vmx::Codec::simd_path()`
+(`avx2` / `sse128` / `neon` / `scalar`) and host capabilities via
+`simd_capabilities()`.
 
 ## MSRV
 
