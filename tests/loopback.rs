@@ -38,24 +38,39 @@ fn metadata_subscribe_and_video_roundtrip() {
     }
     assert!(sender.video_subscribed());
 
-    let payload = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+    let width = 16i32;
+    let height = 16i32;
+    let stride = (width as usize) * 2;
+    let payload = vec![128u8; stride * height as usize];
     let frame = MediaFrame {
         frame_type: FrameType::VIDEO,
         timestamp: 12345,
         codec: openmediatransport::Codec::Uyvy as i32,
-        width: 16,
-        height: 16,
+        width,
+        height,
+        stride: stride as i32,
         frame_rate_n: 60,
         frame_rate_d: 1,
         aspect_ratio: 1.0,
-        data: payload.clone(),
+        data: payload,
         ..Default::default()
     };
     sender.send_video(frame).expect("send");
 
-    // Uncompressed UYVY is rejected by the VMX-only decoder — expect drop, not hang.
-    thread::sleep(Duration::from_millis(100));
-    let _ = session.try_recv_video();
+    let mut got = None;
+    for _ in 0..200 {
+        if let Some(f) = session.try_recv_video()
+            && f.timestamp == 12345
+        {
+            got = Some(f);
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let frame = got.expect("decoded uncompressed UYVY");
+    assert_eq!(frame.width, width as u32);
+    assert_eq!(frame.height, height as u32);
+    assert_eq!(frame.pixels.len(), (width * height * 4) as usize);
     let _ = SUBSCRIBE_VIDEO;
     session.disconnect();
 }

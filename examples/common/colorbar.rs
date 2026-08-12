@@ -2,8 +2,9 @@
 
 use std::f32::consts::TAU;
 
-use openmediatransport::{NETWORK_ASYNC_COUNT, NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER};
-use vmx::Profile;
+use openmediatransport::{
+    NETWORK_ASYNC_COUNT, NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER, Quality,
+};
 
 /// Default audio chunk size (10 ms at 48 kHz). Independent of video frame rate.
 pub const DEFAULT_AUDIO_SAMPLES: i32 = 480;
@@ -22,8 +23,8 @@ pub struct SendOptions {
     pub channels: i32,
     /// Samples per audio packet (default 480 = 10 ms @ 48 kHz).
     pub audio_samples: i32,
-    /// VMX profile (`OmtLq` / `OmtSq` / `OmtHq`). Default `OmtSq` for realtime demos.
-    pub profile: Profile,
+    /// Encoding quality. Default `Medium`.
+    pub quality: Quality,
     /// Sender outbound queue depth (`0` = blocking). Default = libomtnet `NETWORK_ASYNC_COUNT` (4).
     pub send_queue: usize,
     /// TCP send buffer. Default = `NETWORK_SEND_BUFFER` (64 KiB).
@@ -45,7 +46,7 @@ impl Default for SendOptions {
             sample_rate: 48_000,
             channels: 2,
             audio_samples: DEFAULT_AUDIO_SAMPLES,
-            profile: Profile::OmtSq,
+            quality: Quality::Medium,
             send_queue: NETWORK_ASYNC_COUNT,
             send_buffer: NETWORK_SEND_BUFFER,
             recv_buffer: NETWORK_SEND_RECEIVE_BUFFER,
@@ -86,11 +87,10 @@ impl SendOptions {
     }
 
     pub fn profile_name(&self) -> &'static str {
-        match self.profile {
-            Profile::OmtLq => "lq",
-            Profile::OmtSq => "sq",
-            Profile::OmtHq => "hq",
-            _ => "custom",
+        match self.quality {
+            Quality::Low => "lq",
+            Quality::High => "hq",
+            Quality::Medium | Quality::Default => "sq",
         }
     }
 }
@@ -137,10 +137,10 @@ fn apply_flag(opts: &mut SendOptions, flag: &str, args: &mut impl Iterator<Item 
         }
         "--profile" => {
             if let Some(v) = args.next() {
-                opts.profile = match v.to_ascii_lowercase().as_str() {
-                    "lq" | "low" => Profile::OmtLq,
-                    "hq" | "high" => Profile::OmtHq,
-                    _ => Profile::OmtSq,
+                opts.quality = match v.to_ascii_lowercase().as_str() {
+                    "lq" | "low" => Quality::Low,
+                    "hq" | "high" => Quality::High,
+                    _ => Quality::Medium,
                 };
             }
         }
