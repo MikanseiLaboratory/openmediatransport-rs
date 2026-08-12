@@ -272,6 +272,13 @@ impl Statistics {
     pub fn record_dropped(&mut self) {
         self.frames_dropped = self.frames_dropped.saturating_add(1);
     }
+
+    /// Accumulate codec time in microseconds.
+    pub fn record_codec(&mut self, duration: std::time::Duration) {
+        let us = duration.as_micros() as i64;
+        self.codec_time = self.codec_time.saturating_add(us);
+        self.codec_time_since_last = self.codec_time_since_last.saturating_add(us);
+    }
 }
 
 /// Owned media frame (video, audio, or metadata).

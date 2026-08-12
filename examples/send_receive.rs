@@ -1,9 +1,8 @@
-//! Basic sync send/receive loopback over localhost (VMX1 → BGRA).
+//! Basic sync send/receive loopback over localhost (UYVY → VMX1 → BGRA).
 
 use openmediatransport::{Codec, FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender};
 use std::thread;
 use std::time::Duration;
-use vmx::{Codec as VmxCodec, Config as VmxConfig, Profile};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sender = Sender::create("Loopback", FrameType::VIDEO | FrameType::METADATA)?;
@@ -35,28 +34,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let width = 64i32;
     let height = 64i32;
-    let stride = (width as usize) * 2;
-    let uyvy = vec![128u8; stride * height as usize];
-    let mut enc = VmxCodec::new(VmxConfig {
-        width,
-        height,
-        profile: Profile::OmtLq,
-        color_space: Default::default(),
-    })?;
-    enc.encode_uyvy(&uyvy, stride)?;
-    let mut bitstream = vec![0u8; 1 << 20];
-    let len = enc.save_to(&mut bitstream)?;
+    let stride = width * 2;
+    let uyvy = vec![128u8; (stride * height) as usize];
 
     let frame = MediaFrame {
         frame_type: FrameType::VIDEO,
         timestamp: 0,
-        codec: Codec::Vmx1 as i32,
+        codec: Codec::Uyvy as i32,
         width,
         height,
+        stride,
         frame_rate_n: 60,
         frame_rate_d: 1,
         aspect_ratio: 1.0,
-        data: bitstream[..len].to_vec(),
+        data: uyvy,
         ..Default::default()
     };
     sender.send_video(frame)?;

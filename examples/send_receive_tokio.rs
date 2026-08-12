@@ -1,14 +1,16 @@
 //! Tokio send/receive example (`--features tokio`).
+//!
+//! Uncompressed UYVY is encoded inside [`AsyncSender::send_video`].
 
 #[cfg(feature = "tokio")]
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use openmediatransport::async_api::{AsyncReceiver, AsyncSender};
-    use openmediatransport::{Codec, FrameType, MediaFrame};
-    use vmx::{Codec as VmxCodec, Config as VmxConfig, Profile};
+    use openmediatransport::{Codec, FrameType, MediaFrame, Quality};
 
     let mut sender =
         AsyncSender::create("TokioSrc", FrameType::VIDEO | FrameType::METADATA).await?;
+    sender.set_quality(Quality::Low);
     let port = sender.port();
     let mut receiver =
         AsyncReceiver::connect(format!("omt://127.0.0.1:{port}"), FrameType::VIDEO).await?;
@@ -22,25 +24,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let width = 64i32;
     let height = 64i32;
-    let stride = (width as usize) * 2;
-    let uyvy = vec![128u8; stride * height as usize];
-    let mut enc = VmxCodec::new(VmxConfig {
-        width,
-        height,
-        profile: Profile::OmtLq,
-        color_space: Default::default(),
-    })?;
-    enc.encode_uyvy(&uyvy, stride)?;
-    let mut bitstream = vec![0u8; 1 << 20];
-    let len = enc.save_to(&mut bitstream)?;
+    let stride = width * 2;
+    let uyvy = vec![128u8; (stride * height) as usize];
 
     let frame = MediaFrame {
         frame_type: FrameType::VIDEO,
         timestamp: 1,
-        codec: Codec::Vmx1 as i32,
+        codec: Codec::Uyvy as i32,
         width,
         height,
-        data: bitstream[..len].to_vec(),
+        stride,
+        data: uyvy,
         frame_rate_n: 60,
         frame_rate_d: 1,
         aspect_ratio: 1.0,

@@ -1,6 +1,7 @@
 //! Continuously send SMPTE-style color bars + sine tone over OMT (sync).
 //!
 //! Prefer `--release`. Debug builds of VMX encode are far too slow for realtime 1080p.
+//! Uncompressed UYVY is encoded inside [`Sender::send_video`].
 //!
 //! Audio runs on a dedicated thread with wall-clock pacing and explicit timestamps so
 //! video encode latency cannot underrun or skew audio (libomtnet uses separate A/V clocks).
@@ -26,7 +27,6 @@ use colorbar::{SendOptions, append_sine_planar, fill_colorbar_uyvy};
 use openmediatransport::{
     Codec, ColorSpace, Discovery, FrameType, MediaFrame, Sender, SenderConfig, SenderInfo,
 };
-use vmx::{Codec as VmxCodec, Config as VmxConfig};
 
 const TICKS_PER_SECOND: i64 = 10_000_000;
 
@@ -53,6 +53,7 @@ fn run(opts: SendOptions) -> Result<(), Box<dyn std::error::Error>> {
             "MikanseiLaboratory",
             env!("CARGO_PKG_VERSION"),
         ));
+        s.set_quality(opts.quality);
     }
 
     let port = sender.lock().unwrap().port();
@@ -87,31 +88,20 @@ fn run(opts: SendOptions) -> Result<(), Box<dyn std::error::Error>> {
         .name("omt-colorbar-audio".into())
         .spawn(move || audio_loop(audio_sender, audio_opts, audio_running, epoch))?;
 
-    let mut vmx = VmxCodec::new(VmxConfig {
-        width: opts.width,
-        height: opts.height,
-        profile: opts.profile,
-        color_space: vmx::ColorSpace::Undefined,
-    })?;
-
-    let stride = (opts.width as usize) * 2;
-    let mut uyvy = vec![0u8; stride * opts.height as usize];
-    let mut vmx_buf = vec![0u8; 8 << 20];
-    let mut send_payload = Vec::with_capacity(1 << 20);
-    let mut cached_vmx: Option<Vec<u8>> = None;
+    let stride = opts.width * 2;
+    let mut uyvy = vec![0u8; (stride * opts.height) as usize];
+    let mut cached_uyvy: Option<Vec<u8>> = None;
     let mut frame_idx = 0u64;
     let mut last_sub = (false, false);
     let mut last_stats = Instant::now();
-    let mut encode_us_acc = 0u64;
-    let mut video_sent = 0u64;
+    let mut last_codec_time = 0i64;
+    let mut last_frames = 0i64;
     let video_interval =
         (opts.fps_d as i64).saturating_mul(TICKS_PER_SECOND) / opts.fps_n.max(1) as i64;
 
     if !opts.animate {
         fill_colorbar_uyvy(&mut uyvy, opts.width, opts.height, 0.0);
-        vmx.encode_uyvy(&uyvy, stride)?;
-        let n = vmx.save_to(&mut vmx_buf)?;
-        cached_vmx = Some(vmx_buf[..n].to_vec());
+        cached_uyvy = Some(uyvy.clone());
     }
 
     while running.load(Ordering::Relaxed) {
@@ -132,64 +122,58 @@ fn run(opts: SendOptions) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Pace video to wall clock (drop/skip if encode is too slow).
         let target = Duration::from_secs_f64(frame_idx as f64 / opts.fps());
         let now = epoch.elapsed();
         if target > now {
             thread::sleep(target - now);
         } else if now > target + Duration::from_secs_f64(2.0 / opts.fps()) {
-            // More than ~2 frames late: jump frame index forward to avoid growing latency.
             frame_idx = (now.as_secs_f64() * opts.fps()).floor() as u64;
         }
 
-        let t0 = Instant::now();
-        let payload = if let Some(cached) = cached_vmx.as_ref() {
+        let data = if let Some(cached) = cached_uyvy.as_ref() {
             cached.clone()
         } else {
             let phase = ((frame_idx % 300) as f32) / 300.0;
             fill_colorbar_uyvy(&mut uyvy, opts.width, opts.height, phase);
-            vmx.encode_uyvy(&uyvy, stride)?;
-            let n = vmx.save_to(&mut vmx_buf)?;
-            send_payload.clear();
-            send_payload.extend_from_slice(&vmx_buf[..n]);
-            send_payload.clone()
+            uyvy.clone()
         };
-        encode_us_acc += t0.elapsed().as_micros() as u64;
 
         let timestamp = (frame_idx as i64).saturating_mul(video_interval);
         let frame = MediaFrame {
             frame_type: FrameType::VIDEO,
             timestamp,
-            codec: Codec::Vmx1 as i32,
+            codec: Codec::Uyvy as i32,
             width: opts.width,
             height: opts.height,
+            stride,
             frame_rate_n: opts.fps_n,
             frame_rate_d: opts.fps_d,
             aspect_ratio: opts.width as f32 / opts.height.max(1) as f32,
             color_space: ColorSpace::Undefined,
-            data: payload,
+            data,
             ..Default::default()
         };
         {
             let mut s = sender.lock().unwrap();
             s.send_video(frame)?;
         }
-        video_sent += 1;
         frame_idx += 1;
 
         if last_stats.elapsed() >= Duration::from_secs(1) {
             let st = sender.lock().unwrap().statistics();
-            let avg_ms = if video_sent > 0 {
-                (encode_us_acc as f64 / video_sent as f64) / 1000.0
+            let df = (st.frames - last_frames).max(0);
+            let dt = (st.codec_time - last_codec_time).max(0);
+            let avg_ms = if df > 0 {
+                (dt as f64 / df as f64) / 1000.0
             } else {
                 0.0
             };
             println!(
-                "stats: video_fps≈{video_sent}/s encode_avg={avg_ms:.1}ms frames={} dropped={}",
+                "stats: video_fps≈{df}/s encode_avg={avg_ms:.1}ms frames={} dropped={}",
                 st.frames, st.frames_dropped
             );
-            encode_us_acc = 0;
-            video_sent = 0;
+            last_codec_time = st.codec_time;
+            last_frames = st.frames;
             last_stats = Instant::now();
         }
     }
@@ -223,7 +207,6 @@ fn audio_loop(
         if due > now {
             thread::sleep(due - now);
         } else if now > due + Duration::from_millis(50) {
-            // Late by >50ms: jump sample timeline to wall clock (avoid backlog after pause).
             samples_sent = (now.as_secs_f64() * rate as f64).round() as i64;
             samples_sent -= samples_sent % samples;
         }

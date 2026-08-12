@@ -88,6 +88,7 @@ pub struct Sender {
     outbound_video: Option<SyncSender<WireBytes>>,
     /// Background queue for audio socket writes (separate so video cannot stall audio).
     outbound_audio: Option<SyncSender<WireBytes>>,
+    video_encoder: crate::send_video::VideoEncoder,
 }
 
 impl Sender {
@@ -132,6 +133,7 @@ impl Sender {
                 Arc::clone(&peers),
                 "omt-send-audio",
             ),
+            video_encoder: crate::send_video::VideoEncoder::new(),
         })
     }
 
@@ -178,6 +180,7 @@ impl Sender {
                 Arc::clone(&peers),
                 "omt-send-audio",
             ),
+            video_encoder: crate::send_video::VideoEncoder::new(),
         })
     }
 
@@ -496,9 +499,20 @@ impl Sender {
     }
 
     /// Send a video frame to subscribed peers (no-op if none subscribed).
-    pub fn send_video(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
+    ///
+    /// Uncompressed formats are encoded to VMX1 before they go on the wire.
+    /// `Codec::Vmx1` payloads are sent as-is.
+    pub fn send_video(&mut self, mut frame: MediaFrame) -> Result<(), OmtError> {
         if !self.subscribed.video {
             return Ok(());
+        }
+        let codec = Codec::from_i32(frame.codec);
+        if codec != Some(Codec::Vmx1) {
+            let quality = self.effective_quality();
+            let (bitstream, elapsed) = self.video_encoder.encode_raw(&frame, quality)?;
+            self.stats.record_codec(elapsed);
+            frame.data = bitstream;
+            frame.codec = Codec::Vmx1 as i32;
         }
         let assembled = self.build_frame(frame)?;
         self.broadcast(&assembled)
@@ -823,5 +837,46 @@ mod tests {
             })
             .unwrap();
         assert!(preview_video_bytes(&uyvy_frame).is_none());
+    }
+
+    #[test]
+    fn send_video_encodes_uyvy_and_passthrough_vmx1() {
+        let mut sender = Sender::create_offline("t", FrameType::VIDEO).unwrap();
+        sender.force_subscribe(true, false, false);
+
+        let stride = 64 * 2;
+        let uyvy = vec![128u8; stride * 64];
+        sender
+            .send_video(MediaFrame {
+                frame_type: FrameType::VIDEO,
+                codec: Codec::Uyvy as i32,
+                width: 64,
+                height: 64,
+                stride: stride as i32,
+                data: uyvy,
+                ..Default::default()
+            })
+            .unwrap();
+        let st = sender.statistics();
+        assert!(st.frames >= 1);
+        assert!(st.codec_time >= 0);
+
+        let mut enc = vmx::Codec::new(vmx::Config::new(64, 64)).unwrap();
+        let uyvy = vec![80u8; stride * 64];
+        enc.encode_uyvy(&uyvy, stride).unwrap();
+        let mut buf = vec![0u8; 1 << 20];
+        let n = enc.save_to(&mut buf).unwrap();
+        let before = sender.statistics().codec_time;
+        sender
+            .send_video(MediaFrame {
+                frame_type: FrameType::VIDEO,
+                codec: Codec::Vmx1 as i32,
+                width: 64,
+                height: 64,
+                data: buf[..n].to_vec(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(sender.statistics().codec_time, before);
     }
 }

@@ -76,6 +76,9 @@ impl AsyncSender {
     }
 
     /// Send a video frame asynchronously.
+    ///
+    /// Uncompressed formats are encoded to VMX1. `Codec::Vmx1` is sent as-is.
+    /// Encode runs via `block_in_place` on the current worker.
     pub async fn send_video(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
         tokio::task::block_in_place(|| self.inner.send_video(frame))
     }
@@ -83,6 +86,26 @@ impl AsyncSender {
     /// Send an audio frame asynchronously.
     pub async fn send_audio(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
         tokio::task::block_in_place(|| self.inner.send_audio(frame))
+    }
+
+    /// Set encoding quality policy.
+    pub fn set_quality(&mut self, quality: crate::types::Quality) {
+        self.inner.set_quality(quality)
+    }
+
+    /// Effective quality (local policy or peer suggestions).
+    pub fn effective_quality(&self) -> crate::types::Quality {
+        self.inner.effective_quality()
+    }
+
+    /// Aggregated tally across peers.
+    pub fn tally(&self) -> crate::types::Tally {
+        self.inner.tally()
+    }
+
+    /// Preview mode requested by any peer.
+    pub fn preview(&self) -> bool {
+        self.inner.preview()
     }
 
     /// Force subscriptions (tests / offline).

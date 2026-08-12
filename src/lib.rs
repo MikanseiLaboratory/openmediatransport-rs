@@ -15,6 +15,7 @@ pub mod protocol;
 mod receive;
 mod redirect;
 mod send;
+mod send_video;
 mod settings;
 mod statistics;
 mod transport;
