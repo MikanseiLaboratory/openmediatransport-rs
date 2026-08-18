@@ -21,7 +21,10 @@ use crate::settings;
 
 pub use address::OmtAddress;
 pub use client::DiscoveryClient;
-pub use server::DiscoveryServer;
+pub use server::{
+    DiscoveryServer, DiscoveryServerEvent, DiscoveryServerHandle, DiscoveryServerSnapshot,
+    default_bind_addr,
+};
 
 /// High-level discovery API (sync), matching libomtnet `OMTDiscovery` browse path.
 ///

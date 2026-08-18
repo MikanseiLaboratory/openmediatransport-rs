@@ -74,6 +74,8 @@ Persistent settings match [libomtnet `OMTSettings`](https://github.com/openmedia
 | macOS / Linux | `~/.OMT/settings.xml` |
 | Override | `OMT_STORAGE_PATH` environment variable (directory containing `settings.xml`) |
 
+`Settings` is a flat key/value map: `entries` / `set_string` / `remove` / `reload` / `save` cover known and unknown keys. `settings_file_path()` and `storage_dir()` expose the platform file location.
+
 `DiscoveryServer` selects an [OMT Discovery Server](https://github.com/openmediatransport/OMTDiscoveryServer#client-configuration) instead of DNS-SD for sender registration. Leave it blank for default DNS-SD. Per-process override:
 
 ```rust
@@ -84,6 +86,8 @@ Settings::global()
     .expect("settings lock")
     .set_string(KEY_DISCOVERY_SERVER, "omt://127.0.0.1:6399");
 ```
+
+The in-process server (`DiscoveryServer` / `DiscoveryServerHandle`) binds dual-stack `[::]:6399` by default, matching the official console app. Tools can start/stop the server, snapshot connected peers and registered sources, and poll `DiscoveryServerEvent`s.
 
 ## License
 

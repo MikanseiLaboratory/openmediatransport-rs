@@ -87,6 +87,51 @@ impl Settings {
         &self.path
     }
 
+    /// Number of stored keys.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// True when no keys are stored.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// True when `key` is present (even if the value is empty).
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
+    /// Keys in sorted order.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.values.keys().map(String::as_str)
+    }
+
+    /// Key/value pairs in sorted key order.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// All key/value pairs as owned strings (sorted by key).
+    pub fn to_vec(&self) -> Vec<(String, String)> {
+        self.values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Remove a key from memory. Does not write the file until [`Self::save`].
+    pub fn remove(&mut self, key: &str) -> Option<String> {
+        self.values.remove(key)
+    }
+
+    /// Reload values from disk, replacing the in-memory map.
+    ///
+    /// Missing or unreadable files yield an empty map (same as [`Self::from_path`]).
+    pub fn reload(&mut self) {
+        *self = Self::from_path(self.path.clone());
+    }
+
     /// Look up a string key, returning `default` when missing.
     pub fn get_string(&self, key: &str, default: &str) -> String {
         self.values
@@ -459,5 +504,37 @@ mod tests {
     #[test]
     fn settings_file_name_matches_libomtnet() {
         assert!(settings_file_path().ends_with(SETTINGS_FILE_NAME));
+    }
+
+    #[test]
+    fn enumerate_remove_and_reload_preserve_unknown_keys() {
+        let path = temp_settings_path();
+        let mut settings = Settings::from_path(&path);
+        settings.set_string(KEY_DISCOVERY_SERVER, "omt://127.0.0.1:6399");
+        settings.set_string("CustomFlag", "yes");
+        settings.save().unwrap();
+
+        let mut loaded = Settings::from_path(&path);
+        assert!(loaded.contains_key("CustomFlag"));
+        assert_eq!(loaded.len(), 2);
+        let keys: Vec<_> = loaded.keys().collect();
+        assert_eq!(keys, vec!["CustomFlag", KEY_DISCOVERY_SERVER]);
+        assert_eq!(loaded.remove("CustomFlag").as_deref(), Some("yes"));
+        assert!(!loaded.contains_key("CustomFlag"));
+        loaded.save().unwrap();
+
+        loaded.set_string("Stale", "memory-only");
+        loaded.reload();
+        assert!(!loaded.contains_key("CustomFlag"));
+        assert!(!loaded.contains_key("Stale"));
+        assert_eq!(
+            loaded.get_string(KEY_DISCOVERY_SERVER, ""),
+            "omt://127.0.0.1:6399"
+        );
+
+        let _ = fs::remove_file(&path);
+        if let Some(dir) = path.parent() {
+            let _ = fs::remove_dir(dir);
+        }
     }
 }
