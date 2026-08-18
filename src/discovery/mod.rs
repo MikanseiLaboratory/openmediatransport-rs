@@ -34,6 +34,7 @@ pub struct Discovery {
 impl Discovery {
     /// Create a discovery instance.
     pub fn new() -> Result<Self, OmtError> {
+        crate::logging::init_logging();
         Ok(Self::default())
     }
 

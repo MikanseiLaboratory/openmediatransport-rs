@@ -9,7 +9,8 @@ pub mod codec;
 pub mod color;
 mod discovery;
 mod error;
-mod logging;
+/// Process file logging compatible with libomtnet (`{storage}/logs`).
+pub mod logging;
 /// Wire protocol framing and metadata helpers.
 pub mod protocol;
 mod receive;
@@ -28,6 +29,7 @@ pub mod async_api;
 pub use color::{bgra_alpha_mask, bgra_to_rgba, bgra_to_rgba_into, uyvy_to_rgba};
 pub use discovery::{Discovery, DiscoveryClient, DiscoveryServer, OmtAddress};
 pub use error::OmtError;
+pub use logging::init_logging;
 pub use receive::{ReceiverConfig, ReceiverSession, SessionState};
 pub use send::{Sender, SenderConfig};
 pub use types::*;
