@@ -4,10 +4,9 @@
 //! tally `Program==` quirk) so official stacks that compare whole strings keep
 //! working.
 //!
-//! **Receiving** parses with the `roxmltree` crate after rewriting `Program==`
-//! to `Program=`. Whitespace, extra attributes, well-formed `Program="true"`,
-//! and [`OMTGroup`](https://github.com/openmediatransport/Metadata) wrapping
-//! are all accepted.
+//! **Receiving** matches the four libomtnet tally constants by exact string
+//! (those documents are not well-formed XML). Everything else is parsed with
+//! `roxmltree` by element/attribute keys, including well-formed `<OMTTally>`.
 
 use crate::error::OmtError;
 use crate::protocol::xml::{XmlElement, escape_xml, parse_bool};
@@ -71,7 +70,7 @@ pub enum Metadata {
         /// Suggested quality when the `Quality` attribute is present.
         quality: Option<Quality>,
     },
-    /// `<OMTTally Preview="…" Program="…" />` (`Program==` is accepted).
+    /// `<OMTTally Preview="…" Program="…" />` (wire form may use `Program==`).
     Tally(Tally),
     /// `<OMTInfo … />`
     SenderInfo(SenderInfo),
@@ -230,10 +229,27 @@ pub fn decode_metadata_xml(bytes: &[u8]) -> Result<String, OmtError> {
 }
 
 /// Parse XML into typed documents. `<OMTGroup>` children are flattened.
+///
+/// Tally uses exact string match against the libomtnet constants first, because
+/// those strings contain `Program==` and are not valid XML. Well-formed
+/// `<OMTTally>` still goes through the XML parser.
 pub fn parse_metadata(xml: &str) -> Vec<Metadata> {
+    if let Some(tally) = tally_from_libomtnet_constant(xml) {
+        return vec![Metadata::Tally(tally)];
+    }
     match XmlElement::parse(xml) {
         Ok(root) => flatten(element_to_metadata(&root)),
         Err(_) => Vec::new(),
+    }
+}
+
+fn tally_from_libomtnet_constant(xml: &str) -> Option<Tally> {
+    match xml {
+        TALLY_PREVIEW => Some(Tally::new(1, 0)),
+        TALLY_PROGRAM => Some(Tally::new(0, 1)),
+        TALLY_PREVIEW_PROGRAM => Some(Tally::new(1, 1)),
+        TALLY_NONE => Some(Tally::new(0, 0)),
+        _ => None,
     }
 }
 
@@ -468,6 +484,12 @@ mod tests {
     fn parse_well_formed_tally_and_whitespace() {
         let xml = "  <OMTTally  Preview=\"true\"  Program=\"true\" />\n";
         assert_eq!(parse_metadata(xml), vec![Metadata::Tally(Tally::new(1, 1))]);
+    }
+
+    #[test]
+    fn non_constant_program_double_equals_is_not_xml() {
+        let xml = r#"<OMTTally Preview="true"  Program=="false" />"#;
+        assert!(parse_metadata(xml).is_empty());
     }
 
     #[test]

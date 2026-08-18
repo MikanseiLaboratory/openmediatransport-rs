@@ -1,8 +1,7 @@
-//! XML element parser for OMT metadata.
+//! XML element parser for OMT metadata, backed by `roxmltree`.
 //!
-//! Well-formed documents are parsed with [`roxmltree`]. Official libomtnet tally
-//! constants use invalid XML (`Program==` instead of `Program=`), so that known
-//! quirk is rewritten before the library sees the document.
+//! Control tally from libomtnet is **not** parsed here: those constants use
+//! invalid `Program==` and are matched as exact strings in [`super::metadata`].
 
 use crate::error::OmtError;
 
@@ -20,12 +19,10 @@ pub struct XmlElement {
 }
 
 impl XmlElement {
-    /// Parse `xml` into a single root element.
-    ///
-    /// `Program=="x"` is accepted as attribute `Program` = `x` (libomtnet tally).
+    /// Parse well-formed `xml` into a single root element.
     pub fn parse(xml: &str) -> Result<Self, OmtError> {
-        let xml = sanitize_omt_xml(xml);
-        let doc = roxmltree::Document::parse(&xml)
+        let xml = xml.trim_start_matches('\u{feff}');
+        let doc = roxmltree::Document::parse(xml)
             .map_err(|e| OmtError::Protocol(format!("invalid metadata XML: {e}")))?;
         Ok(from_node(doc.root_element()))
     }
@@ -82,12 +79,6 @@ pub fn escape_xml(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// libomtnet tally constants use `Program==`. Rewrite to well-formed XML.
-fn sanitize_omt_xml(xml: &str) -> String {
-    xml.trim_start_matches('\u{feff}')
-        .replace("Program==", "Program=")
-}
-
 fn from_node(node: roxmltree::Node<'_, '_>) -> XmlElement {
     let attributes = node
         .attributes()
@@ -115,13 +106,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_tally_with_double_equals_quirk() {
-        let el = XmlElement::parse(r#"<OMTTally Preview="true" Program=="false" />"#).unwrap();
-        assert_eq!(el.name, "OMTTally");
-        assert_eq!(el.attr("Preview"), Some("true"));
-        assert_eq!(el.attr("Program"), Some("false"));
-        assert_eq!(el.attr_bool("Preview"), Some(true));
-        assert_eq!(el.attr_bool("Program"), Some(false));
+    fn rejects_libomtnet_tally_quirk() {
+        assert!(XmlElement::parse(r#"<OMTTally Preview="true" Program=="false" />"#).is_err());
     }
 
     #[test]

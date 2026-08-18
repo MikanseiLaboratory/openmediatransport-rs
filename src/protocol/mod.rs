@@ -3,5 +3,5 @@
 pub mod binary;
 pub mod frame;
 pub mod metadata;
-/// Tolerant XML parser for metadata (roxmltree, plus the libomtnet `Program==` quirk).
+/// XML parser for well-formed metadata (`roxmltree`).
 pub mod xml;
