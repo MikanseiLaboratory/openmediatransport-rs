@@ -31,6 +31,7 @@ pub use color::{bgra_alpha_mask, bgra_to_rgba, bgra_to_rgba_into, uyvy_to_rgba};
 pub use discovery::{Discovery, DiscoveryClient, DiscoveryServer, OmtAddress};
 pub use error::OmtError;
 pub use logging::init_logging;
+pub use protocol::metadata::{Metadata, PtzMetadata, parse_metadata};
 pub use receive::{ReceiverConfig, ReceiverSession, SessionState};
 pub use send::{Sender, SenderConfig};
 pub use settings::{

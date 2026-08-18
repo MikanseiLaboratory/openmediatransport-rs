@@ -15,14 +15,14 @@ use crate::error::OmtError;
 use crate::protocol::frame::{AssembledFrame, FrameHeader, PROTOCOL_VERSION};
 use crate::protocol::metadata::{
     PREVIEW_OFF, PREVIEW_ON, SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO,
-    encode_metadata_xml, suggested_quality_xml,
+    encode_metadata_xml, suggested_quality_xml, tally_xml,
 };
 use crate::transport::channel::Channel;
 use crate::transport::pool::BufferPool;
 use crate::transport::socket::connect;
 use crate::types::{
     AUDIO_MAX_SIZE, Codec, ColorSpace, DecodedAudioFrame, DecodedVideoFrame, FrameType,
-    MetadataFrame, Quality, SessionStatistics, VIDEO_MAX_SIZE, VideoFlags,
+    MetadataFrame, Quality, SessionStatistics, Tally, VIDEO_MAX_SIZE, VideoFlags,
 };
 
 /// Wire-compressed video queue depth (backpressure → drop).
@@ -165,6 +165,7 @@ struct Shared {
     last_error: Mutex<Option<String>>,
     video: DecodedVideoQueue,
     wire_depth: AtomicU32,
+    outbound_meta: Mutex<Vec<String>>,
 }
 
 impl Shared {
@@ -197,6 +198,7 @@ pub struct ReceiverSession {
     audio_rx: MpscReceiver<DecodedAudioFrame>,
     metadata_rx: MpscReceiver<MetadataFrame>,
     joins: Vec<JoinHandle<()>>,
+    can_send_metadata: bool,
 }
 
 impl ReceiverSession {
@@ -270,6 +272,7 @@ impl ReceiverSession {
             last_error: Mutex::new(None),
             video: DecodedVideoQueue::new(VIDEO_DECODED_Q),
             wire_depth: AtomicU32::new(0),
+            outbound_meta: Mutex::new(Vec::new()),
         });
 
         let (video_wire_tx, video_wire_rx) = sync_channel::<WireVideo>(VIDEO_WIRE_Q);
@@ -348,6 +351,7 @@ impl ReceiverSession {
             audio_rx,
             metadata_rx,
             joins,
+            can_send_metadata: want_video,
         })
     }
 
@@ -401,6 +405,26 @@ impl ReceiverSession {
     /// Non-blocking poll for metadata.
     pub fn try_recv_metadata(&self) -> Option<MetadataFrame> {
         self.metadata_rx.try_recv().ok()
+    }
+
+    /// Queue XML to send on the video/metadata socket (libomtnet `SendMetadata`).
+    pub fn send_metadata(&self, xml: impl Into<String>) -> Result<(), OmtError> {
+        if !self.can_send_metadata {
+            return Err(OmtError::InvalidArgument(
+                "receiver has no metadata-capable socket".into(),
+            ));
+        }
+        self.shared
+            .outbound_meta
+            .lock()
+            .map_err(|_| OmtError::Network("receiver lock poisoned".into()))?
+            .push(xml.into());
+        Ok(())
+    }
+
+    /// Send tally to the sender (`<OMTTally … />`, including the `Program==` wire form).
+    pub fn set_tally(&self, tally: Tally) -> Result<(), OmtError> {
+        self.send_metadata(tally_xml(tally))
     }
 
     /// Snapshot of session statistics (includes live queue depths).
@@ -730,6 +754,20 @@ fn write_metadata_frame(stream: &mut TcpStream, xml: &str) -> Result<(), OmtErro
     Ok(())
 }
 
+fn flush_outbound_metadata(stream: &mut TcpStream, shared: &Shared) {
+    let pending = shared
+        .outbound_meta
+        .lock()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default();
+    for xml in pending {
+        if let Err(e) = write_metadata_frame(stream, &xml) {
+            shared.set_error(format!("send metadata: {e}"));
+            break;
+        }
+    }
+}
+
 fn record_bytes(stats: &Mutex<SessionStatistics>, n: usize) {
     if let Ok(mut g) = stats.lock() {
         g.bytes_received = g.bytes_received.saturating_add(n as u64);
@@ -783,6 +821,7 @@ fn video_reader_loop(
     read_buf.resize(crate::types::NETWORK_RECEIVE_MAX_TRANSFER, 0);
 
     while !shared.stop.load(Ordering::Acquire) {
+        flush_outbound_metadata(&mut stream, shared);
         let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
         match channel.recv_frame_into(&mut stream, &mut read_buf) {
             Ok(Some(frame)) => {

@@ -1,10 +1,14 @@
 //! Metadata encode/decode tests.
 
+use std::thread;
+use std::time::{Duration, Instant};
+
 use openmediatransport::protocol::metadata::{
     SUBSCRIBE_VIDEO, TALLY_NONE, TALLY_PREVIEW, TALLY_PREVIEW_PROGRAM, TALLY_PROGRAM,
-    decode_metadata_xml, encode_metadata_xml, tally_xml,
+    decode_metadata_xml, encode_metadata_xml, parse_metadata, tally_xml,
 };
 use openmediatransport::types::Tally;
+use openmediatransport::{FrameType, Metadata, ReceiverConfig, ReceiverSession, Sender};
 
 #[test]
 fn metadata_roundtrip_matches_libomtnet() {
@@ -46,4 +50,51 @@ fn tally_xml_mapping() {
     assert_eq!(tally_xml(Tally::new(1, 0)), TALLY_PREVIEW);
     assert_eq!(tally_xml(Tally::new(0, 1)), TALLY_PROGRAM);
     assert_eq!(tally_xml(Tally::new(1, 1)), TALLY_PREVIEW_PROGRAM);
+}
+
+#[test]
+fn parse_metadata_reads_attribute_keys() {
+    let items = parse_metadata(r#"<OMTTally Preview="true" Program=="true" />"#);
+    assert_eq!(items, vec![Metadata::Tally(Tally::new(1, 1))]);
+}
+
+#[test]
+fn receiver_tally_updates_sender() {
+    let mut sender =
+        Sender::create("TallySrc", FrameType::VIDEO | FrameType::METADATA).expect("sender");
+    let url = format!("omt://127.0.0.1:{}", sender.port());
+    let rx = ReceiverSession::connect(
+        url,
+        ReceiverConfig {
+            frame_types: FrameType::VIDEO | FrameType::METADATA,
+            auto_reconnect: false,
+            connect_timeout: Duration::from_secs(3),
+            ..ReceiverConfig::default()
+        },
+    )
+    .expect("rx");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let _ = sender.poll_accept();
+        let _ = sender.poll_peer_metadata();
+        if sender.connection_count() > 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(sender.connection_count() > 0, "receiver did not connect");
+
+    rx.set_tally(Tally::new(1, 1)).expect("set_tally");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let _ = sender.poll_accept();
+        let _ = sender.poll_peer_metadata();
+        if sender.tally() == Tally::new(1, 1) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("expected program+preview tally, got {:?}", sender.tally());
 }

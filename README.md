@@ -54,7 +54,7 @@ fn main() -> Result<(), openmediatransport::OmtError> {
 }
 ```
 
-See [PROTOCOL.md](PROTOCOL.md) for the wire format.
+See [PROTOCOL.md](PROTOCOL.md) for the wire format and [OMT Metadata](https://github.com/openmediatransport/Metadata) for recommended XML types (`OMTWeb`, `OMTPTZ`, `OMTGroup`, …). Incoming metadata is parsed by element/attribute key (`parse_metadata` / `MetadataFrame::parse`); receivers can send tally with `ReceiverSession::set_tally`.
 
 ## Settings (`settings.xml`)
 
