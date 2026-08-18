@@ -108,6 +108,7 @@ impl Sender {
         if name.is_empty() {
             return Err(OmtError::InvalidArgument("sender name is empty".into()));
         }
+        crate::logging::init_logging();
         let (listener, port) = bind_port_range()?;
         let peers = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self {
@@ -156,6 +157,7 @@ impl Sender {
         if name.is_empty() {
             return Err(OmtError::InvalidArgument("sender name is empty".into()));
         }
+        crate::logging::init_logging();
         let peers = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self {
             name,
