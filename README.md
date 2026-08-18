@@ -56,6 +56,35 @@ fn main() -> Result<(), openmediatransport::OmtError> {
 
 See [PROTOCOL.md](PROTOCOL.md) for the wire format.
 
+## Settings (`settings.xml`)
+
+Persistent settings match [libomtnet `OMTSettings`](https://github.com/openmediatransport/libomtnet/blob/master/src/OMTSettings.cs). The file is a flat XML map (not a fixed schema):
+
+```xml
+<Settings>
+  <DiscoveryServer>omt://x.x.x.x:port</DiscoveryServer>
+  <NetworkPortStart>6400</NetworkPortStart>
+  <NetworkPortEnd>6600</NetworkPortEnd>
+</Settings>
+```
+
+| Location | Path |
+|----------|------|
+| Windows | `%ProgramData%\OMT\settings.xml` (`C:\ProgramData\OMT\settings.xml`) |
+| macOS / Linux | `~/.OMT/settings.xml` |
+| Override | `OMT_STORAGE_PATH` environment variable (directory containing `settings.xml`) |
+
+`DiscoveryServer` selects an [OMT Discovery Server](https://github.com/openmediatransport/OMTDiscoveryServer#client-configuration) instead of DNS-SD for sender registration. Leave it blank for default DNS-SD. Per-process override:
+
+```rust
+use openmediatransport::{Settings, KEY_DISCOVERY_SERVER};
+
+Settings::global()
+    .lock()
+    .expect("settings lock")
+    .set_string(KEY_DISCOVERY_SERVER, "omt://127.0.0.1:6399");
+```
+
 ## License
 
 MIT — Copyright (c) 2026 Open Media Transport Contributors and MikanseiLaboratory

@@ -18,13 +18,13 @@ use crate::protocol::metadata::{
     PREVIEW_OFF, PREVIEW_ON, SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO,
     decode_metadata_xml, encode_metadata_xml, tally_xml,
 };
+use crate::settings;
 use crate::transport::socket::{
     configure_sender_peer_stream, configure_stream_buffers, into_listener, listen,
 };
 use crate::types::{
-    Codec, FrameType, MediaFrame, NETWORK_ASYNC_COUNT, NETWORK_PORT_END, NETWORK_PORT_START,
-    NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER, Quality, SenderInfo, Statistics, Tally,
-    VideoFlags,
+    Codec, FrameType, MediaFrame, NETWORK_ASYNC_COUNT, NETWORK_SEND_BUFFER,
+    NETWORK_SEND_RECEIVE_BUFFER, Quality, SenderInfo, Statistics, Tally, VideoFlags,
 };
 
 /// Peer subscription / control state.
@@ -92,7 +92,8 @@ pub struct Sender {
 }
 
 impl Sender {
-    /// Create a sender that listens on an available port in 6400..=6600.
+    /// Create a sender that listens on an available port in 6400..=6600
+    /// (or `NetworkPortStart`..=`NetworkPortEnd` from `settings.xml`).
     pub fn create(name: impl Into<String>, frame_types: FrameType) -> Result<Self, OmtError> {
         Self::create_with_config(name, frame_types, SenderConfig::default())
     }
@@ -780,15 +781,22 @@ fn apply_metadata(state: &mut PeerState, xml: &str) {
 }
 
 fn bind_port_range() -> Result<(TcpListener, u16), OmtError> {
-    for port in NETWORK_PORT_START..=NETWORK_PORT_END {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        if let Ok(sock) = listen(addr) {
-            let listener = into_listener(sock)?;
-            return Ok((listener, port));
+    let (start, end) = settings::global_network_port_range();
+    bind_port_range_between(start, end)
+}
+
+fn bind_port_range_between(start: u16, end: u16) -> Result<(TcpListener, u16), OmtError> {
+    if start <= end {
+        for port in start..=end {
+            let addr = SocketAddr::from(([0, 0, 0, 0], port));
+            if let Ok(sock) = listen(addr) {
+                let listener = into_listener(sock)?;
+                return Ok((listener, port));
+            }
         }
     }
     Err(OmtError::Network(format!(
-        "no free port in {NETWORK_PORT_START}..={NETWORK_PORT_END}"
+        "no free port in {start}..={end}"
     )))
 }
 
@@ -880,5 +888,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sender.statistics().codec_time, before);
+    }
+
+    #[test]
+    fn bind_port_range_rejects_inverted_range() {
+        let err = bind_port_range_between(10, 5).unwrap_err();
+        assert!(matches!(err, OmtError::Network(_)));
     }
 }

@@ -1,10 +1,11 @@
 //! Process file logging compatible with libomtnet `OMTLogging`.
 //!
-//! Log files are `{storage}/logs/{exe}{pid}.log`:
+//! Log files are `{storage}/logs/{exe}{pid}.log`. The storage directory is the
+//! same as [`crate::Settings`] (`settings.xml`):
 //!
 //! - Windows: `%ProgramData%\OMT\logs` (`C:\ProgramData\OMT\logs`)
 //! - macOS / Linux: `~/.OMT/logs`
-//! - Override the storage directory with [`OMT_STORAGE_PATH`]
+//! - Override the storage directory with [`crate::OMT_STORAGE_PATH`]
 //!
 //! [`init_logging`] is called automatically from sender, receiver, and discovery
 //! constructors. Applications may also call it at startup.
@@ -14,53 +15,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// Environment variable overriding the OMT storage directory.
-pub const OMT_STORAGE_PATH: &str = "OMT_STORAGE_PATH";
-
 static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
-
-/// Directory that contains `settings.xml` and `logs/`.
-pub fn storage_dir() -> PathBuf {
-    storage_dir_from(
-        std::env::var(OMT_STORAGE_PATH)
-            .ok()
-            .filter(|s| !s.is_empty()),
-        std::env::var_os("ProgramData").map(PathBuf::from),
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from),
-    )
-}
-
-fn storage_dir_from(
-    storage_override: Option<String>,
-    program_data: Option<PathBuf>,
-    home: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(p) = storage_override {
-        return PathBuf::from(p);
-    }
-    default_storage_dir(program_data, home)
-}
-
-fn default_storage_dir(program_data: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let _ = home;
-        program_data
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-            .join("OMT")
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = program_data;
-        home.unwrap_or_else(|| PathBuf::from(".")).join(".OMT")
-    }
-}
 
 /// `{storage}/logs`.
 pub fn logs_dir() -> PathBuf {
-    storage_dir().join("logs")
+    crate::settings::storage_dir().join("logs")
 }
 
 /// `{exe_name}{pid}.log` under [`logs_dir`], matching libomtnet `OMTLogging`.
@@ -235,29 +194,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn storage_override_wins() {
-        let dir = storage_dir_from(
-            Some(String::from("/tmp/omt-store")),
-            Some(PathBuf::from(r"C:\ProgramData")),
-            Some(PathBuf::from("/home/user")),
+    fn logs_dir_is_under_settings_storage() {
+        let dir = logs_dir();
+        assert!(
+            dir.ends_with("logs"),
+            "logs dir should end with logs: {}",
+            dir.display()
         );
-        assert_eq!(dir, PathBuf::from("/tmp/omt-store"));
-    }
-
-    #[test]
-    fn default_storage_dir_is_platform_specific() {
-        let dir = default_storage_dir(
-            Some(PathBuf::from(r"C:\ProgramData")),
-            Some(PathBuf::from("/home/user")),
-        );
-        #[cfg(windows)]
-        {
-            assert_eq!(dir, PathBuf::from(r"C:\ProgramData\OMT"));
-        }
-        #[cfg(not(windows))]
-        {
-            assert_eq!(dir, PathBuf::from("/home/user/.OMT"));
-        }
     }
 
     #[test]
