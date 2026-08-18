@@ -84,13 +84,20 @@ Metadata is stored as UTF-8 encoded, null terminated XML data.
 DataLength should always include the null character.
 
 Special metadata commands are used to control various aspects of the connection.
-libomtnet emits these as fixed strings (including a `Program==` quirk on tally)
-so naive implementations can compare whole strings.
 
-This crate **sends** those exact strings for interoperability, but **receives**
-by parsing XML element/attribute keys. Whitespace, extra attributes, well-formed
-`Program="true"`, and the `Program==` form are all accepted. Multiple documents
-may be wrapped in `<OMTGroup>` ([recommended formats](https://github.com/openmediatransport/Metadata)).
+libomtnet documents these as **fixed static strings**, not as XML that receivers
+must parse. From [`OMTMetadataConstants`](https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L31-L35):
+
+> Fixed static XML commands for protocol use.
+> Receivers will check for these exact string matches and won't bother to parse the XML.
+> This means any changes to these, even slightly will result in the commands being ignored entirely.
+
+This crate **sends** those exact constants. **Receiving** matches the four tally
+constants by exact string first (they use invalid `Program==` and cannot be
+XML-parsed), then parses everything else with an XML parser by element/attribute
+keys. Well-formed `<OMTTally Program="true" />` is therefore still accepted here,
+but official libomtnet receivers will ignore it. Multiple documents may be
+wrapped in `<OMTGroup>` ([recommended application formats](https://github.com/openmediatransport/Metadata)).
 
 ### Subscribe Commands
 
@@ -115,10 +122,15 @@ Enable/disable sending preview video data instead of the full resolution frame.
 
 ### Tally Commands
 
-\<OMTTally Preview="true" Program="false" /\>
-\<OMTTally Preview="false" Program="true" /\>
-\<OMTTally Preview="true" Program="true" /\>
-\<OMTTally Preview="false" Program="false" /\>
+On the wire these are the libomtnet constants (`Program==` is a double equals,
+not well-formed XML):
+
+\<OMTTally Preview="true" Program=="false" /\>
+\<OMTTally Preview="false" Program=="true" /\>
+\<OMTTally Preview="true" Program=="true" /\>
+\<OMTTally Preview="false" Program=="false" /\>
+
+See [`TALLY_PREVIEW` … `TALLY_NONE`](https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L43-L46).
 
 Sent by a receiver to indicate tally status.
 

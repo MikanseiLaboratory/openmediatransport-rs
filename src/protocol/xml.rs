@@ -2,6 +2,8 @@
 //!
 //! Control tally from libomtnet is **not** parsed here: those constants use
 //! invalid `Program==` and are matched as exact strings in [`super::metadata`].
+//! Official receivers do the same:
+//! <https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L31-L35>
 
 use crate::error::OmtError;
 

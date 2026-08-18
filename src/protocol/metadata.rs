@@ -1,12 +1,14 @@
 //! Metadata XML templates, typed parse, and helpers.
 //!
-//! **Sending** still emits the exact libomtnet control strings (including the
-//! tally `Program==` quirk) so official stacks that compare whole strings keep
-//! working.
+//! libomtnet treats the protocol control strings as **exact tokens**, not XML:
+//! <https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L31-L35>
+//!
+//! **Sending** therefore emits those same constants (including the tally
+//! `Program==` quirk) so official receivers keep matching them.
 //!
 //! **Receiving** matches the four libomtnet tally constants by exact string
-//! (those documents are not well-formed XML). Everything else is parsed with
-//! `roxmltree` by element/attribute keys, including well-formed `<OMTTally>`.
+//! first (those documents are not well-formed XML). Everything else is parsed
+//! with `roxmltree` by element/attribute keys, including well-formed `<OMTTally>`.
 
 use crate::error::OmtError;
 use crate::protocol::xml::{XmlElement, escape_xml, parse_bool};
@@ -31,7 +33,9 @@ pub const SUGGESTED_QUALITY_PREFIX: &str = r#"<OMTSettings Quality="#;
 
 /// Tally: preview on, program off.
 ///
-/// NOTE: `Program==` (double equals) is intentional on the wire.
+/// NOTE: `Program==` (double equals) is intentional on the wire. Official
+/// receivers compare these four tally strings verbatim and do not XML-parse
+/// them ([libomtnet comment](https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L31-L35)).
 pub const TALLY_PREVIEW: &str = r#"<OMTTally Preview="true" Program=="false" />"#;
 /// Tally: preview off, program on.
 pub const TALLY_PROGRAM: &str = r#"<OMTTally Preview="false" Program=="true" />"#;
@@ -231,8 +235,9 @@ pub fn decode_metadata_xml(bytes: &[u8]) -> Result<String, OmtError> {
 /// Parse XML into typed documents. `<OMTGroup>` children are flattened.
 ///
 /// Tally uses exact string match against the libomtnet constants first, because
-/// those strings contain `Program==` and are not valid XML. Well-formed
-/// `<OMTTally>` still goes through the XML parser.
+/// those strings contain `Program==` and are not valid XML
+/// ([source](https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L31-L46)).
+/// Well-formed `<OMTTally>` still goes through the XML parser.
 pub fn parse_metadata(xml: &str) -> Vec<Metadata> {
     if let Some(tally) = tally_from_libomtnet_constant(xml) {
         return vec![Metadata::Tally(tally)];
