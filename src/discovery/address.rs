@@ -209,18 +209,28 @@ impl OmtAddress {
 
     /// Parse discovery-server address XML (`OMTAddress.FromXML`).
     pub fn from_xml(xml: &str) -> Result<Self, OmtError> {
-        let name = xml_text(xml, "Name")
-            .ok_or_else(|| OmtError::InvalidArgument("OMTAddress XML missing Name".into()))?;
-        let port: u16 = xml_text(xml, "Port")
-            .ok_or_else(|| OmtError::InvalidArgument("OMTAddress XML missing Port".into()))?
-            .parse()
-            .map_err(|_| OmtError::InvalidArgument("OMTAddress XML invalid Port".into()))?;
-        let mut addr = Self::from_full_name(&name, port);
-        addr.removed = xml_text(xml, "Removed")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        addr.addresses = xml_all_text(xml, "IPAddress");
-        Ok(addr)
+        for item in crate::protocol::metadata::parse_metadata(xml) {
+            if let crate::protocol::metadata::Metadata::Address {
+                name,
+                port,
+                removed,
+                addresses,
+            } = item
+            {
+                if name.is_empty() {
+                    return Err(OmtError::InvalidArgument(
+                        "OMTAddress XML missing Name".into(),
+                    ));
+                }
+                let mut addr = Self::from_full_name(&name, port);
+                addr.removed = removed;
+                addr.addresses = addresses;
+                return Ok(addr);
+            }
+        }
+        Err(OmtError::InvalidArgument(
+            "OMTAddress XML missing Name".into(),
+        ))
     }
 }
 
@@ -264,32 +274,6 @@ fn escape_xml(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-fn xml_text(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    Some(xml[start..end].trim().to_string())
-}
-
-fn xml_all_text(xml: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(pos) = rest.find(&open) {
-        let start = pos + open.len();
-        if let Some(end_rel) = rest[start..].find(&close) {
-            let end = start + end_rel;
-            out.push(rest[start..end].trim().to_string());
-            rest = &rest[end + close.len()..];
-        } else {
-            break;
-        }
-    }
-    out
 }
 
 fn hostname() -> String {
@@ -344,5 +328,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a.to_url(), "omt://CAMHOST:6400/Output 1");
+    }
+
+    #[test]
+    fn from_xml_reads_child_elements() {
+        let xml = r#"<OMTAddress>
+  <Name>HOST (Cam)</Name>
+  <Port>6400</Port>
+  <Addresses>
+    <IPAddress>10.0.0.1</IPAddress>
+  </Addresses>
+</OMTAddress>"#;
+        let a = OmtAddress::from_xml(xml).unwrap();
+        assert_eq!(a.instance_name(), "HOST (Cam)");
+        assert_eq!(a.port, 6400);
+        assert_eq!(a.addresses, vec!["10.0.0.1"]);
     }
 }

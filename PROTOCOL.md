@@ -84,8 +84,13 @@ Metadata is stored as UTF-8 encoded, null terminated XML data.
 DataLength should always include the null character.
 
 Special metadata commands are used to control various aspects of the connection.
-These are fixed strings that must be specified exactly.
-This is an optimization so that the end point can employ simple string matching rather than full XML parsing.
+libomtnet emits these as fixed strings (including a `Program==` quirk on tally)
+so naive implementations can compare whole strings.
+
+This crate **sends** those exact strings for interoperability, but **receives**
+by parsing XML element/attribute keys. Whitespace, extra attributes, well-formed
+`Program="true"`, and the `Program==` form are all accepted. Multiple documents
+may be wrapped in `<OMTGroup>` ([recommended formats](https://github.com/openmediatransport/Metadata)).
 
 ### Subscribe Commands
 
@@ -141,6 +146,16 @@ Default is Medium quality.
 \<OMTInfo ProductName="MyProduct" Manufacturer="MyCompany" Version="1.0" /\>
 
 Senders can optionally send information about the encoder to receivers when connected.
+
+### Recommended application metadata
+
+See the [OMT Metadata specification](https://github.com/openmediatransport/Metadata) for Web management, PTZ, ancillary data, and grouping:
+
+\<OMTWeb URL="http://x.x.x.x/" /\>
+
+\<OMTPTZ Protocol="VISCAoverIP" URL="visca://x.x.x.x:port"  /\>
+
+\<OMTGroup\> … \</OMTGroup\>
 
 ## DNS-SD
 

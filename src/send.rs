@@ -15,8 +15,7 @@ use crate::protocol::frame::{
     VIDEO_EXT_HEADER_SIZE, VideoHeader,
 };
 use crate::protocol::metadata::{
-    PREVIEW_OFF, PREVIEW_ON, SUBSCRIBE_AUDIO, SUBSCRIBE_METADATA, SUBSCRIBE_VIDEO,
-    decode_metadata_xml, encode_metadata_xml, tally_xml,
+    Metadata, decode_metadata_xml, encode_metadata_xml, parse_metadata, tally_xml,
 };
 use crate::transport::socket::{
     configure_sender_peer_stream, configure_stream_buffers, into_listener, listen,
@@ -743,37 +742,34 @@ fn preview_video_bytes(frame: &AssembledFrame) -> Option<Vec<u8>> {
 }
 
 fn apply_metadata(state: &mut PeerState, xml: &str) {
-    if xml == SUBSCRIBE_VIDEO {
-        state.video = true;
-    } else if xml == SUBSCRIBE_AUDIO {
-        state.audio = true;
-    } else if xml == SUBSCRIBE_METADATA {
-        state.metadata = true;
-    } else if xml == PREVIEW_ON {
-        state.preview = true;
-    } else if xml == PREVIEW_OFF {
-        state.preview = false;
-    } else if let Some(rest) = xml.strip_prefix(r#"<OMTSettings Quality=""#) {
-        if let Some(name) = rest.split('"').next() {
-            state.quality = match name {
-                "Low" => Quality::Low,
-                "Medium" => Quality::Medium,
-                "High" => Quality::High,
-                _ => Quality::Default,
-            };
+    for item in parse_metadata(xml) {
+        match item {
+            Metadata::Subscribe {
+                video,
+                audio,
+                metadata,
+            } => {
+                if video {
+                    state.video = true;
+                }
+                if audio {
+                    state.audio = true;
+                }
+                if metadata {
+                    state.metadata = true;
+                }
+            }
+            Metadata::Settings { preview, quality } => {
+                if let Some(on) = preview {
+                    state.preview = on;
+                }
+                if let Some(q) = quality {
+                    state.quality = q;
+                }
+            }
+            Metadata::Tally(tally) => state.tally = tally,
+            _ => {}
         }
-    } else if xml.contains("OMTTally") {
-        state.tally.preview = if xml.contains(r#"Preview="true""#) {
-            1
-        } else {
-            0
-        };
-        state.tally.program =
-            if xml.contains(r#"Program=="true""#) || xml.contains(r#"Program="true""#) {
-                1
-            } else {
-                0
-            };
     }
 }
 
@@ -878,5 +874,21 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sender.statistics().codec_time, before);
+    }
+
+    #[test]
+    fn apply_metadata_uses_xml_attribute_keys() {
+        let mut state = PeerState::default();
+        apply_metadata(&mut state, r#"<OMTSubscribe Video="true" Audio="true" />"#);
+        apply_metadata(
+            &mut state,
+            " <OMTTally Preview=\"true\" Program=\"false\" /> ",
+        );
+        apply_metadata(&mut state, r#"<OMTSettings Quality="High" />"#);
+        apply_metadata(&mut state, r#"<OMTSettings Preview="true" />"#);
+        assert!(state.video && state.audio);
+        assert_eq!(state.tally, Tally::new(1, 0));
+        assert_eq!(state.quality, Quality::High);
+        assert!(state.preview);
     }
 }

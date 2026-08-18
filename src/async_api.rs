@@ -207,6 +207,16 @@ impl AsyncReceiver {
         self.inner.try_recv_metadata()
     }
 
+    /// Queue XML to send on the video/metadata socket.
+    pub fn send_metadata(&self, xml: impl Into<String>) -> Result<(), OmtError> {
+        self.inner.send_metadata(xml)
+    }
+
+    /// Send tally to the sender.
+    pub fn set_tally(&self, tally: crate::types::Tally) -> Result<(), OmtError> {
+        self.inner.set_tally(tally)
+    }
+
     /// Snapshot of receive statistics.
     pub fn statistics(&self) -> SessionStatistics {
         self.inner.statistics()
