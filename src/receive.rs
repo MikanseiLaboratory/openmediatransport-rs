@@ -217,6 +217,7 @@ impl ReceiverSession {
         extra_addresses: &[String],
         config: ReceiverConfig,
     ) -> Result<Self, OmtError> {
+        crate::logging::init_logging();
         let address = address.into();
         if address.is_empty() {
             return Err(OmtError::InvalidArgument(

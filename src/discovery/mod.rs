@@ -42,6 +42,7 @@ impl Discovery {
     /// If [`crate::KEY_DISCOVERY_SERVER`] is set in the process settings, connects
     /// to that discovery server (failures are logged and DNS-SD is used instead).
     pub fn new() -> Result<Self, OmtError> {
+        crate::logging::init_logging();
         let mut this = Self::default();
         if let Some(url) = settings::global_discovery_server() {
             match DiscoveryClient::connect_url(&url) {
