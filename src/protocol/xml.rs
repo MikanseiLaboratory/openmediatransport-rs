@@ -1,9 +1,8 @@
-//! Tolerant XML element parser for OMT metadata.
+//! XML element parser for OMT metadata.
 //!
-//! OMT control strings are not always well-formed XML (libomtnet tally uses
-//! `Program==` instead of `Program=`). This parser extracts element names,
-//! attributes, children, and text so callers can look up keys instead of
-//! matching entire strings.
+//! Well-formed documents are parsed with [`roxmltree`]. Official libomtnet tally
+//! constants use invalid XML (`Program==` instead of `Program=`), so that known
+//! quirk is rewritten before the library sees the document.
 
 use crate::error::OmtError;
 
@@ -12,7 +11,7 @@ use crate::error::OmtError;
 pub struct XmlElement {
     /// Tag name (`OMTTally`, `OMTPTZ`, …).
     pub name: String,
-    /// Attributes in document order. Names are stored without extra `=`.
+    /// Attributes in document order.
     pub attributes: Vec<(String, String)>,
     /// Direct child elements.
     pub children: Vec<XmlElement>,
@@ -23,19 +22,12 @@ pub struct XmlElement {
 impl XmlElement {
     /// Parse `xml` into a single root element.
     ///
-    /// Leading BOM, XML declarations, and comments are skipped. `Program=="x"`
-    /// is accepted as attribute `Program` = `x`.
+    /// `Program=="x"` is accepted as attribute `Program` = `x` (libomtnet tally).
     pub fn parse(xml: &str) -> Result<Self, OmtError> {
-        let rest = skip_prolog(xml);
-        let (el, rest) = parse_element(rest)?;
-        let rest = skip_prolog(rest).trim();
-        if !rest.is_empty() {
-            return Err(OmtError::Protocol(format!(
-                "trailing XML after <{}>: {rest}",
-                el.name
-            )));
-        }
-        Ok(el)
+        let xml = sanitize_omt_xml(xml);
+        let doc = roxmltree::Document::parse(&xml)
+            .map_err(|e| OmtError::Protocol(format!("invalid metadata XML: {e}")))?;
+        Ok(from_node(doc.root_element()))
     }
 
     /// Attribute value for `name`, or `None` if missing.
@@ -81,198 +73,6 @@ pub fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn skip_prolog(s: &str) -> &str {
-    let mut rest = s.trim_start_matches('\u{feff}');
-    loop {
-        rest = rest.trim_start();
-        if rest.starts_with("<?") {
-            match rest.find("?>") {
-                Some(end) => rest = &rest[end + 2..],
-                None => break,
-            }
-            continue;
-        }
-        if rest.starts_with("<!--") {
-            match rest.find("-->") {
-                Some(end) => rest = &rest[end + 3..],
-                None => break,
-            }
-            continue;
-        }
-        break;
-    }
-    rest
-}
-
-fn parse_element(input: &str) -> Result<(XmlElement, &str), OmtError> {
-    let rest = skip_prolog(input);
-    let rest = rest
-        .strip_prefix('<')
-        .ok_or_else(|| OmtError::Protocol("expected '<' to start XML element".into()))?;
-    if rest.starts_with('/') {
-        return Err(OmtError::Protocol("unexpected closing tag".into()));
-    }
-    let (name, rest) = parse_name(rest)?;
-    if name.is_empty() {
-        return Err(OmtError::Protocol("empty XML element name".into()));
-    }
-    let (attributes, rest) = parse_attributes(rest)?;
-    let rest = rest.trim_start();
-    if let Some(rest) = rest.strip_prefix("/>") {
-        return Ok((
-            XmlElement {
-                name,
-                attributes,
-                children: Vec::new(),
-                text: String::new(),
-            },
-            rest,
-        ));
-    }
-    let rest = rest
-        .strip_prefix('>')
-        .ok_or_else(|| OmtError::Protocol(format!("expected '>' after <{name}")))?;
-    let (children, text, rest) = parse_content(&name, rest)?;
-    Ok((
-        XmlElement {
-            name,
-            attributes,
-            children,
-            text,
-        },
-        rest,
-    ))
-}
-
-fn parse_content<'a>(
-    name: &str,
-    mut rest: &'a str,
-) -> Result<(Vec<XmlElement>, String, &'a str), OmtError> {
-    let mut children = Vec::new();
-    let mut text = String::new();
-    loop {
-        if rest.is_empty() {
-            return Err(OmtError::Protocol(format!("unclosed <{name}>")));
-        }
-        if rest.starts_with("<!--") {
-            rest = match rest.find("-->") {
-                Some(end) => &rest[end + 3..],
-                None => return Err(OmtError::Protocol("unclosed XML comment".into())),
-            };
-            continue;
-        }
-        if let Some(after) = rest.strip_prefix("</") {
-            let (end_name, after) = parse_name(after)?;
-            if end_name != name {
-                return Err(OmtError::Protocol(format!(
-                    "mismatched close: expected </{name}>, got </{end_name}>"
-                )));
-            }
-            let after = after.trim_start();
-            let after = after
-                .strip_prefix('>')
-                .ok_or_else(|| OmtError::Protocol(format!("expected '>' after </{name}")))?;
-            return Ok((children, text.trim().to_string(), after));
-        }
-        if rest.starts_with('<') {
-            let (child, after) = parse_element(rest)?;
-            children.push(child);
-            rest = after;
-            continue;
-        }
-        match rest.find('<') {
-            Some(pos) => {
-                text.push_str(&unescape_xml(&rest[..pos]));
-                rest = &rest[pos..];
-            }
-            None => {
-                return Err(OmtError::Protocol(format!("unclosed <{name}>")));
-            }
-        }
-    }
-}
-
-type AttrList<'a> = Result<(Vec<(String, String)>, &'a str), OmtError>;
-
-fn parse_attributes(mut rest: &str) -> AttrList<'_> {
-    let mut attrs = Vec::new();
-    loop {
-        rest = rest.trim_start();
-        if rest.is_empty() || rest.starts_with('/') || rest.starts_with('>') {
-            return Ok((attrs, rest));
-        }
-        let (name, after) = parse_name(rest)?;
-        rest = after.trim_start();
-        let mut eq = 0usize;
-        while let Some(stripped) = rest.strip_prefix('=') {
-            eq += 1;
-            rest = stripped;
-        }
-        if eq == 0 {
-            return Err(OmtError::Protocol(format!(
-                "attribute {name} is missing '='"
-            )));
-        }
-        rest = rest.trim_start();
-        let (value, after) = parse_quoted(rest)?;
-        attrs.push((name, value));
-        rest = after;
-    }
-}
-
-fn parse_name(s: &str) -> Result<(String, &str), OmtError> {
-    let mut chars = s.char_indices();
-    let Some((_, first)) = chars.next() else {
-        return Err(OmtError::Protocol("expected XML name".into()));
-    };
-    if !is_name_start(first) {
-        return Err(OmtError::Protocol(format!(
-            "invalid XML name start {first:?}"
-        )));
-    }
-    let mut end = first.len_utf8();
-    for (i, c) in chars {
-        if is_name_char(c) {
-            end = i + c.len_utf8();
-        } else {
-            break;
-        }
-    }
-    Ok((s[..end].to_string(), &s[end..]))
-}
-
-fn is_name_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_' || c == ':'
-}
-
-fn is_name_char(c: char) -> bool {
-    is_name_start(c) || c.is_ascii_digit() || c == '-' || c == '.'
-}
-
-fn parse_quoted(s: &str) -> Result<(String, &str), OmtError> {
-    let quote = s
-        .chars()
-        .next()
-        .filter(|c| *c == '"' || *c == '\'')
-        .ok_or_else(|| OmtError::Protocol("expected quoted attribute value".into()))?;
-    let inner = &s[quote.len_utf8()..];
-    let end = inner
-        .find(quote)
-        .ok_or_else(|| OmtError::Protocol("unclosed attribute quotes".into()))?;
-    Ok((
-        unescape_xml(&inner[..end]),
-        &inner[end + quote.len_utf8()..],
-    ))
-}
-
-fn unescape_xml(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-}
-
 /// Escape text or attribute values for XML output.
 pub fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -280,6 +80,34 @@ pub fn escape_xml(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+/// libomtnet tally constants use `Program==`. Rewrite to well-formed XML.
+fn sanitize_omt_xml(xml: &str) -> String {
+    xml.trim_start_matches('\u{feff}')
+        .replace("Program==", "Program=")
+}
+
+fn from_node(node: roxmltree::Node<'_, '_>) -> XmlElement {
+    let attributes = node
+        .attributes()
+        .map(|a| (a.name().to_string(), a.value().to_string()))
+        .collect();
+    let mut children = Vec::new();
+    let mut text = String::new();
+    for child in node.children() {
+        if child.is_element() {
+            children.push(from_node(child));
+        } else if child.is_text() {
+            text.push_str(child.text().unwrap_or(""));
+        }
+    }
+    XmlElement {
+        name: node.tag_name().name().to_string(),
+        attributes,
+        children,
+        text: text.trim().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +169,10 @@ mod tests {
             Some("http://10.0.0.5/")
         );
         assert_eq!(el.child("OMTPTZ").unwrap().attr("Protocol"), Some("VISCA"));
+    }
+
+    #[test]
+    fn rejects_malformed_xml() {
+        assert!(XmlElement::parse("<OMTTally Preview=").is_err());
     }
 }

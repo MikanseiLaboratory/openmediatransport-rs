@@ -4,10 +4,10 @@
 //! tally `Program==` quirk) so official stacks that compare whole strings keep
 //! working.
 //!
-//! **Receiving** parses elements and attributes by key. Whitespace, extra
-//! attributes, well-formed `Program="true"`, the `Program==` quirk, and
-//! [`OMTGroup`](https://github.com/openmediatransport/Metadata) wrapping are
-//! all accepted.
+//! **Receiving** parses with the `roxmltree` crate after rewriting `Program==`
+//! to `Program=`. Whitespace, extra attributes, well-formed `Program="true"`,
+//! and [`OMTGroup`](https://github.com/openmediatransport/Metadata) wrapping
+//! are all accepted.
 
 use crate::error::OmtError;
 use crate::protocol::xml::{XmlElement, escape_xml, parse_bool};
