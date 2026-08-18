@@ -1,7 +1,7 @@
 //! Loopback send/receive integration test.
 
 use openmediatransport::{
-    FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender,
+    FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender, Settings,
     protocol::metadata::SUBSCRIBE_VIDEO,
 };
 use std::thread;
@@ -12,7 +12,14 @@ fn metadata_subscribe_and_video_roundtrip() {
     let mut sender =
         Sender::create("TestSrc", FrameType::VIDEO | FrameType::METADATA).expect("sender");
     let port = sender.port();
-    assert!((6400..=6600).contains(&port));
+    let (start, end) = Settings::global()
+        .lock()
+        .expect("settings lock")
+        .network_port_range();
+    assert!(
+        (start..=end).contains(&port),
+        "sender port {port} outside configured range {start}..={end}"
+    );
 
     let url = format!("omt://127.0.0.1:{port}");
     let session = ReceiverSession::connect(
