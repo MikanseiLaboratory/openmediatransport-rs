@@ -51,9 +51,8 @@ impl Channel {
         reader: &mut R,
         scratch: &mut [u8],
     ) -> Result<Option<AssembledFrame>, OmtError> {
-        match self.try_pop_frame()? {
-            Some(frame) => return Ok(Some(frame)),
-            None => {}
+        if let Some(frame) = self.try_pop_frame()? {
+            return Ok(Some(frame));
         }
         match reader.read(scratch) {
             Ok(0) => {
