@@ -156,3 +156,98 @@ fn shutdown_interrupts_reconnect_wait() {
     // Port 1 should refuse quickly.
     assert!(session.is_err());
 }
+
+#[test]
+fn second_session_receives_video_after_disconnect() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let sender = Arc::new(Mutex::new(
+        Sender::create("ReconnectSrc", FrameType::VIDEO).unwrap(),
+    ));
+    let port = sender.lock().unwrap().port();
+    let payload = encode_pattern(64, 64);
+    let running = Arc::new(AtomicBool::new(true));
+    let pump_sender = Arc::clone(&sender);
+    let pump_running = Arc::clone(&running);
+    let pump_payload = payload;
+    let pump = thread::spawn(move || {
+        let mut ts = 1i64;
+        while pump_running.load(Ordering::Relaxed) {
+            {
+                let mut s = pump_sender.lock().unwrap();
+                let _ = s.poll_accept();
+                let _ = s.poll_peer_metadata();
+                if s.video_subscribed() {
+                    let frame = MediaFrame {
+                        frame_type: FrameType::VIDEO,
+                        timestamp: ts * 10_000_000,
+                        codec: Codec::Vmx1 as i32,
+                        width: 64,
+                        height: 64,
+                        frame_rate_n: 60,
+                        frame_rate_d: 1,
+                        aspect_ratio: 1.0,
+                        data: pump_payload.clone(),
+                        ..Default::default()
+                    };
+                    let _ = s.send_video(frame);
+                    ts += 1;
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+
+    fn wait_frame(session: &ReceiverSession, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if session.try_recv_video().is_some() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    let cfg = ReceiverConfig {
+        frame_types: FrameType::VIDEO,
+        auto_reconnect: false,
+        connect_timeout: Duration::from_secs(2),
+        ..ReceiverConfig::default()
+    };
+    let url = format!("omt://127.0.0.1:{port}");
+
+    let first = ReceiverSession::connect(&url, cfg.clone()).unwrap();
+    assert!(
+        wait_frame(&first, Duration::from_secs(3)),
+        "first session got no video; err={:?} stats={:?}",
+        first.last_error(),
+        first.statistics()
+    );
+    first.disconnect();
+
+    // Immediate re-select, matching Studio Monitor source switching.
+    let second = ReceiverSession::connect(&url, cfg.clone()).unwrap();
+    assert!(
+        wait_frame(&second, Duration::from_secs(3)),
+        "second session got no video; err={:?} stats={:?} state={:?} connections={}",
+        second.last_error(),
+        second.statistics(),
+        second.state(),
+        sender.lock().unwrap().connection_count()
+    );
+    second.disconnect();
+
+    let third = ReceiverSession::connect(&url, cfg).unwrap();
+    assert!(
+        wait_frame(&third, Duration::from_secs(3)),
+        "third session got no video; err={:?} stats={:?}",
+        third.last_error(),
+        third.statistics()
+    );
+    third.disconnect();
+
+    running.store(false, Ordering::Relaxed);
+    let _ = pump.join();
+}

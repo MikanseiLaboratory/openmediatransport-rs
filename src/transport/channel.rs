@@ -51,6 +51,10 @@ impl Channel {
         reader: &mut R,
         scratch: &mut [u8],
     ) -> Result<Option<AssembledFrame>, OmtError> {
+        match self.try_pop_frame()? {
+            Some(frame) => return Ok(Some(frame)),
+            None => {}
+        }
         match reader.read(scratch) {
             Ok(0) => {
                 if self.buf.is_empty() {
@@ -104,8 +108,15 @@ impl Channel {
         if self.buf.len() < HEADER_SIZE {
             return Ok(None);
         }
-        let header = FrameHeader::from_bytes(&self.buf)?;
+        let header = match FrameHeader::from_bytes(&self.buf) {
+            Ok(h) => h,
+            Err(e) => {
+                self.buf.clear();
+                return Err(e);
+            }
+        };
         if header.data_length < 0 {
+            self.buf.clear();
             return Err(OmtError::Protocol("negative data_length".into()));
         }
         let data_len = header.data_length as usize;
@@ -130,6 +141,11 @@ impl Channel {
         let remainder = self.buf.split_off(total);
         let frame_bytes = std::mem::replace(&mut self.buf, remainder);
         AssembledFrame::from_bytes(&frame_bytes).map(Some)
+    }
+
+    /// Drop buffered bytes (protocol desync recovery).
+    pub fn clear(&mut self) {
+        self.buf.clear();
     }
 
     /// Bytes currently buffered awaiting a complete frame.
@@ -206,5 +222,16 @@ mod tests {
         ch.push_bytes(&bytes);
         let frame = ch.try_pop_frame().unwrap().expect("frame");
         assert_eq!(frame.data, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn bad_version_clears_reassembly_buffer() {
+        let mut ch = Channel::new(FrameType::VIDEO);
+        let mut hdr = [0u8; HEADER_SIZE];
+        hdr[0] = 99;
+        hdr[1] = FrameType::VIDEO.0;
+        ch.push_bytes(&hdr);
+        assert!(ch.try_pop_frame().is_err());
+        assert_eq!(ch.buffered_len(), 0);
     }
 }

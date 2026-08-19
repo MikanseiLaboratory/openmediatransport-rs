@@ -125,17 +125,39 @@ impl Discovery {
         let mut remaining = Vec::new();
         for addr in self.registered.drain(..) {
             if addr.instance_name().contains(name) {
-                if let Some(client) = &mut self.server_client {
-                    let _ = client.deregister(&addr);
-                } else {
-                    let _ = mdns::withdraw(&addr.instance_name());
-                }
+                withdraw_address(&mut self.server_client, &addr);
             } else {
                 remaining.push(addr);
             }
         }
         self.registered = remaining;
         Ok(())
+    }
+
+    /// Withdraw every locally registered source.
+    ///
+    /// DNS-SD: `unregister`. Discovery server: `<Removed>True</Removed>`
+    /// (libomtnet `DeregisterAddress`).
+    pub fn deregister_all(&mut self) -> Result<(), OmtError> {
+        let registered = std::mem::take(&mut self.registered);
+        for addr in registered {
+            withdraw_address(&mut self.server_client, &addr);
+        }
+        Ok(())
+    }
+}
+
+fn withdraw_address(server_client: &mut Option<DiscoveryClient>, addr: &OmtAddress) {
+    if let Some(client) = server_client {
+        let _ = client.deregister(addr);
+    } else {
+        let _ = mdns::withdraw(&addr.instance_name());
+    }
+}
+
+impl Drop for Discovery {
+    fn drop(&mut self) {
+        let _ = self.deregister_all();
     }
 }
 
@@ -148,5 +170,13 @@ mod tests {
         let d = Discovery::default();
         assert!(!d.using_server());
         assert!(d.sources().is_empty());
+    }
+
+    #[test]
+    fn deregister_all_clears_tracked_sources() {
+        let mut d = Discovery::default();
+        d.registered.push(OmtAddress::new("Cam", 6400));
+        d.deregister_all().unwrap();
+        assert!(d.registered.is_empty());
     }
 }

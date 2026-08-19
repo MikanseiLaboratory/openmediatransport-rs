@@ -1,5 +1,7 @@
 //! Public OMT types (aligned with libomtnet).
 
+use std::time::Duration;
+
 /// Frame type bit flags (wire: Metadata=1, Video=2, Audio=4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct FrameType(pub u8);
@@ -364,6 +366,9 @@ pub const NETWORK_RECEIVE_BUFFER: usize = 1_048_576 * 8;
 pub const NETWORK_RECEIVE_MAX_TRANSFER: usize = 128 * 1024;
 /// Outstanding async sends per channel before frames are dropped (libomtnet `NETWORK_ASYNC_COUNT`).
 pub const NETWORK_ASYNC_COUNT: usize = 4;
+/// Upper bound for a blocking peer `write_all`. A dead receiver must not stall
+/// subscribe/accept for the next client (Studio Monitor source switches).
+pub const NETWORK_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 /// Video frame pool depth.
 pub const VIDEO_FRAME_POOL_COUNT: usize = 4;
 /// Audio frame pool depth.

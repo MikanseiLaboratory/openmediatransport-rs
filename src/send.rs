@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -23,7 +23,8 @@ use crate::transport::socket::{
 };
 use crate::types::{
     Codec, FrameType, MediaFrame, NETWORK_ASYNC_COUNT, NETWORK_SEND_BUFFER,
-    NETWORK_SEND_RECEIVE_BUFFER, Quality, SenderInfo, Statistics, Tally, VideoFlags,
+    NETWORK_SEND_RECEIVE_BUFFER, NETWORK_SEND_TIMEOUT, Quality, SenderInfo, Statistics, Tally,
+    VideoFlags,
 };
 
 /// Peer subscription / control state.
@@ -36,6 +37,16 @@ struct PeerState {
     quality: Quality,
     tally: Tally,
 }
+
+#[derive(Debug)]
+struct Peer {
+    stream: TcpStream,
+    state: PeerState,
+    inbound: Vec<u8>,
+}
+
+/// Maximum buffered inbound control bytes per peer (subscribe frames are tiny).
+const PEER_INBOUND_CAP: usize = 64 * 1024;
 
 /// Sender transport / buffering configuration.
 ///
@@ -79,7 +90,7 @@ pub struct Sender {
     audio_clock: TimestampClock,
     listener: Option<TcpListener>,
     port: u16,
-    peers: Arc<Mutex<HashMap<usize, (TcpStream, PeerState)>>>,
+    peers: Arc<Mutex<HashMap<usize, Peer>>>,
     next_peer_id: usize,
     subscribed: PeerState,
     config: SenderConfig,
@@ -216,96 +227,84 @@ impl Sender {
         self.info = info;
     }
 
-    /// Accept one pending connection if available (non-blocking).
+    /// Accept pending connections if available (non-blocking). Drains the
+    /// backlog so a receiver's video+audio pair is accepted in one poll.
     pub fn poll_accept(&mut self) -> Result<bool, OmtError> {
-        let Some(listener) = self.listener.as_ref() else {
-            return Ok(false);
-        };
-        listener.set_nonblocking(true)?;
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                if self.config.send_buffer == NETWORK_SEND_BUFFER
-                    && self.config.recv_buffer == NETWORK_SEND_RECEIVE_BUFFER
-                {
-                    configure_sender_peer_stream(&stream)?;
-                } else {
-                    configure_stream_buffers(
-                        &stream,
-                        self.config.send_buffer,
-                        self.config.recv_buffer,
-                    )?;
+        let mut incoming = Vec::new();
+        {
+            let Some(listener) = self.listener.as_ref() else {
+                return Ok(false);
+            };
+            listener.set_nonblocking(true)?;
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => incoming.push(stream),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(e.into()),
                 }
-                // libomtnet sends OMTInfo immediately on accept.
-                if !self.info.product_name.is_empty()
-                    || !self.info.manufacturer.is_empty()
-                    || !self.info.version.is_empty()
-                {
-                    let _ = stream.set_nonblocking(false);
-                    let data = encode_metadata_xml(&self.info.to_xml());
-                    let frame = AssembledFrame {
-                        header: FrameHeader {
-                            version: PROTOCOL_VERSION,
-                            frame_type: FrameType::METADATA,
-                            timestamp: 0,
-                            metadata_length: 0,
-                            data_length: data.len() as i32,
-                        },
-                        video: None,
-                        audio: None,
-                        data,
-                        metadata: Vec::new(),
-                    };
-                    let _ = stream.write_all(&frame.to_bytes());
-                }
-                stream.set_nonblocking(true)?;
-                let id = self.next_peer_id;
-                self.next_peer_id += 1;
-                self.peers
-                    .lock()
-                    .unwrap()
-                    .insert(id, (stream, PeerState::default()));
-                Ok(true)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
-            Err(e) => Err(e.into()),
         }
+        let accepted = !incoming.is_empty();
+        for stream in incoming {
+            self.add_peer(stream)?;
+        }
+        Ok(accepted)
+    }
+
+    fn add_peer(&mut self, mut stream: TcpStream) -> Result<(), OmtError> {
+        if self.config.send_buffer == NETWORK_SEND_BUFFER
+            && self.config.recv_buffer == NETWORK_SEND_RECEIVE_BUFFER
+        {
+            configure_sender_peer_stream(&stream)?;
+        } else {
+            configure_stream_buffers(&stream, self.config.send_buffer, self.config.recv_buffer)?;
+            let _ = stream.set_write_timeout(Some(NETWORK_SEND_TIMEOUT));
+        }
+        // libomtnet sends OMTInfo immediately on accept.
+        if !self.info.product_name.is_empty()
+            || !self.info.manufacturer.is_empty()
+            || !self.info.version.is_empty()
+        {
+            let _ = stream.set_nonblocking(false);
+            let data = encode_metadata_xml(&self.info.to_xml());
+            let frame = AssembledFrame {
+                header: FrameHeader {
+                    version: PROTOCOL_VERSION,
+                    frame_type: FrameType::METADATA,
+                    timestamp: 0,
+                    metadata_length: 0,
+                    data_length: data.len() as i32,
+                },
+                video: None,
+                audio: None,
+                data,
+                metadata: Vec::new(),
+            };
+            let _ = stream.write_all(&frame.to_bytes());
+        }
+        stream.set_nonblocking(true)?;
+        let id = self.next_peer_id;
+        self.next_peer_id += 1;
+        self.peers.lock().unwrap().insert(
+            id,
+            Peer {
+                stream,
+                state: PeerState::default(),
+                inbound: Vec::new(),
+            },
+        );
+        Ok(())
     }
 
     /// Process inbound metadata from peers (subscribe / preview / tally / quality).
     pub fn poll_peer_metadata(&mut self) -> Result<(), OmtError> {
         let mut peers = self.peers.lock().unwrap();
         let mut dead = Vec::new();
-        for (id, (stream, state)) in peers.iter_mut() {
+        for (id, peer) in peers.iter_mut() {
             let mut buf = [0u8; 8192];
-            match stream.read(&mut buf) {
+            match peer.stream.read(&mut buf) {
                 Ok(0) => dead.push(*id),
-                Ok(n) => {
-                    let mut rest = &buf[..n];
-                    while rest.len() >= crate::protocol::frame::HEADER_SIZE {
-                        let header = match FrameHeader::from_bytes(rest) {
-                            Ok(h) => h,
-                            Err(_) => break,
-                        };
-                        if header.data_length < 0 {
-                            break;
-                        }
-                        let total =
-                            crate::protocol::frame::HEADER_SIZE + header.data_length as usize;
-                        if rest.len() < total {
-                            break;
-                        }
-                        if let Ok(frame) = AssembledFrame::from_bytes(&rest[..total]) {
-                            if frame.header.frame_type.contains(FrameType::METADATA) {
-                                if let Ok(xml) = decode_metadata_xml(&frame.data) {
-                                    apply_metadata(state, &xml);
-                                }
-                            } else if let Ok(xml) = decode_metadata_xml(&frame.metadata) {
-                                apply_metadata(state, &xml);
-                            }
-                        }
-                        rest = &rest[total..];
-                    }
-                }
+                Ok(n) => ingest_peer_bytes(&mut peer.state, &mut peer.inbound, &buf[..n]),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(_) => dead.push(*id),
             }
@@ -322,7 +321,8 @@ impl Sender {
         let peers = self.peers.lock().unwrap();
         let mut agg = PeerState::default();
         let mut best_q = Quality::Default;
-        for (_, state) in peers.values() {
+        for peer in peers.values() {
+            let state = &peer.state;
             agg.video |= state.video;
             agg.audio |= state.audio;
             agg.metadata |= state.metadata;
@@ -606,10 +606,10 @@ impl Sender {
         self.subscribed.audio = audio;
         self.subscribed.metadata = metadata;
         if let Ok(mut peers) = self.peers.lock() {
-            for (_, state) in peers.values_mut() {
-                state.video = video;
-                state.audio = audio;
-                state.metadata = metadata;
+            for peer in peers.values_mut() {
+                peer.state.video = video;
+                peer.state.audio = audio;
+                peer.state.metadata = metadata;
             }
         }
     }
@@ -618,8 +618,8 @@ impl Sender {
     pub fn force_preview(&mut self, preview: bool) {
         self.subscribed.preview = preview;
         if let Ok(mut peers) = self.peers.lock() {
-            for (_, state) in peers.values_mut() {
-                state.preview = preview;
+            for peer in peers.values_mut() {
+                peer.state.preview = preview;
             }
         }
     }
@@ -641,7 +641,7 @@ impl Sender {
     pub fn video_subscriber_count(&self) -> usize {
         self.peers
             .lock()
-            .map(|p| p.values().filter(|(_, s)| s.video).count())
+            .map(|p| p.values().filter(|peer| peer.state.video).count())
             .unwrap_or(0)
     }
 
@@ -649,8 +649,31 @@ impl Sender {
     pub fn audio_subscriber_count(&self) -> usize {
         self.peers
             .lock()
-            .map(|p| p.values().filter(|(_, s)| s.audio).count())
+            .map(|p| p.values().filter(|peer| peer.state.audio).count())
             .unwrap_or(0)
+    }
+
+    /// Stop listening and RST remaining peer sockets (libomtnet `OMTSend.Dispose`).
+    ///
+    /// Discovery unregister is owned by [`crate::Discovery`] — drop or
+    /// [`crate::Discovery::deregister`] that handle separately.
+    pub fn close(&mut self) {
+        self.listener = None;
+        self.outbound_video = None;
+        self.outbound_audio = None;
+        if let Ok(mut peers) = self.peers.lock() {
+            for peer in peers.values() {
+                let _ = peer.stream.shutdown(Shutdown::Both);
+            }
+            peers.clear();
+        }
+        self.subscribed = PeerState::default();
+    }
+}
+
+impl Drop for Sender {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -681,7 +704,7 @@ fn peer_wants(state: &PeerState, ft: FrameType) -> bool {
 
 fn spawn_typed_writer(
     depth: usize,
-    peers: Arc<Mutex<HashMap<usize, (TcpStream, PeerState)>>>,
+    peers: Arc<Mutex<HashMap<usize, Peer>>>,
     name: &str,
 ) -> Option<SyncSender<WireBytes>> {
     if depth == 0 {
@@ -699,24 +722,26 @@ fn spawn_typed_writer(
     Some(tx)
 }
 
-fn write_peers(peers: &Mutex<HashMap<usize, (TcpStream, PeerState)>>, wire: &WireBytes) {
+fn write_peers(peers: &Mutex<HashMap<usize, Peer>>, wire: &WireBytes) {
     let mut peers = peers.lock().unwrap();
     let mut dead = Vec::new();
-    for (id, (stream, state)) in peers.iter_mut() {
-        if !peer_wants(state, wire.ft) {
+    for (id, peer) in peers.iter_mut() {
+        if !peer_wants(&peer.state, wire.ft) {
             continue;
         }
-        let bytes = if wire.ft.contains(FrameType::VIDEO) && state.preview {
+        let bytes = if wire.ft.contains(FrameType::VIDEO) && peer.state.preview {
             wire.preview.as_deref().unwrap_or(&wire.full)
         } else {
             &wire.full
         };
-        // Ensure full-frame writes (peers may have been set non-blocking for accept/poll).
-        let _ = stream.set_nonblocking(false);
-        if stream.write_all(bytes).is_err() {
+        // Blocking write with a short timeout: a dead receiver must not stall
+        // accept/subscribe for the next Studio Monitor session.
+        let _ = peer.stream.set_write_timeout(Some(NETWORK_SEND_TIMEOUT));
+        let _ = peer.stream.set_nonblocking(false);
+        if peer.stream.write_all(bytes).is_err() {
             dead.push(*id);
         } else {
-            let _ = stream.set_nonblocking(true);
+            let _ = peer.stream.set_nonblocking(true);
         }
     }
     for id in dead {
@@ -742,6 +767,44 @@ fn preview_video_bytes(frame: &AssembledFrame) -> Option<Vec<u8>> {
     preview.header.data_length =
         (VIDEO_EXT_HEADER_SIZE + preview.data.len() + preview.metadata.len()) as i32;
     Some(preview.to_bytes())
+}
+
+fn ingest_peer_bytes(state: &mut PeerState, inbound: &mut Vec<u8>, data: &[u8]) {
+    inbound.extend_from_slice(data);
+    if inbound.len() > PEER_INBOUND_CAP {
+        inbound.clear();
+        return;
+    }
+    loop {
+        if inbound.len() < crate::protocol::frame::HEADER_SIZE {
+            break;
+        }
+        let header = match FrameHeader::from_bytes(inbound) {
+            Ok(h) => h,
+            Err(_) => {
+                inbound.clear();
+                break;
+            }
+        };
+        if header.data_length < 0 {
+            inbound.clear();
+            break;
+        }
+        let total = crate::protocol::frame::HEADER_SIZE + header.data_length as usize;
+        if inbound.len() < total {
+            break;
+        }
+        let frame_bytes: Vec<u8> = inbound.drain(..total).collect();
+        if let Ok(frame) = AssembledFrame::from_bytes(&frame_bytes) {
+            if frame.header.frame_type.contains(FrameType::METADATA) {
+                if let Ok(xml) = decode_metadata_xml(&frame.data) {
+                    apply_metadata(state, &xml);
+                }
+            } else if let Ok(xml) = decode_metadata_xml(&frame.metadata) {
+                apply_metadata(state, &xml);
+            }
+        }
+    }
 }
 
 fn apply_metadata(state: &mut PeerState, xml: &str) {
@@ -903,8 +966,44 @@ mod tests {
     }
 
     #[test]
+    fn ingest_peer_bytes_reassembles_split_subscribe() {
+        let xml = crate::protocol::metadata::SUBSCRIBE_VIDEO;
+        let data = encode_metadata_xml(xml);
+        let frame = AssembledFrame {
+            header: FrameHeader {
+                version: PROTOCOL_VERSION,
+                frame_type: FrameType::METADATA,
+                timestamp: 0,
+                metadata_length: 0,
+                data_length: data.len() as i32,
+            },
+            video: None,
+            audio: None,
+            data,
+            metadata: Vec::new(),
+        };
+        let bytes = frame.to_bytes();
+        assert!(bytes.len() > 8);
+        let mut state = PeerState::default();
+        let mut inbound = Vec::new();
+        ingest_peer_bytes(&mut state, &mut inbound, &bytes[..8]);
+        assert!(!state.video, "partial header must not drop the subscribe");
+        ingest_peer_bytes(&mut state, &mut inbound, &bytes[8..]);
+        assert!(state.video);
+    }
+
+    #[test]
     fn bind_port_range_rejects_inverted_range() {
         let err = bind_port_range_between(10, 5).unwrap_err();
         assert!(matches!(err, OmtError::Network(_)));
+    }
+
+    #[test]
+    fn close_is_idempotent() {
+        let mut sender = Sender::create_offline("t", FrameType::VIDEO).unwrap();
+        sender.close();
+        sender.close();
+        assert_eq!(sender.connection_count(), 0);
+        assert!(!sender.video_subscribed());
     }
 }
