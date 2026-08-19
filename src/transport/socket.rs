@@ -6,7 +6,9 @@ use std::time::Duration;
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::error::OmtError;
-use crate::types::{NETWORK_RECEIVE_BUFFER, NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER};
+use crate::types::{
+    NETWORK_RECEIVE_BUFFER, NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER, NETWORK_SEND_TIMEOUT,
+};
 
 /// Apply OMT-recommended TCP options for a **receiver** connection.
 pub fn configure_stream(stream: &TcpStream) -> Result<(), OmtError> {
@@ -16,8 +18,13 @@ pub fn configure_stream(stream: &TcpStream) -> Result<(), OmtError> {
 /// Apply OMT-recommended TCP options for a **sender-side** peer connection.
 ///
 /// Matches libomtnet: 64 KiB send + 64 KiB receive on the sending channel.
+/// A write timeout prevents a dead peer from stalling every other client.
 pub fn configure_sender_peer_stream(stream: &TcpStream) -> Result<(), OmtError> {
-    configure_stream_buffers(stream, NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER)
+    configure_stream_buffers(stream, NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER)?;
+    let _ = stream.set_write_timeout(Some(NETWORK_SEND_TIMEOUT));
+    let sock = socket2::SockRef::from(stream);
+    let _ = sock.set_linger(Some(Duration::ZERO));
+    Ok(())
 }
 
 /// Apply TCP options with explicit buffer sizes.
@@ -72,7 +79,12 @@ pub fn connect(addr: SocketAddr, timeout: Option<Duration>) -> Result<TcpStream,
         None => socket.connect(&addr.into())?,
     }
     let stream: TcpStream = socket.into();
+    // `connect_timeout` toggles non-blocking internally; restore blocking I/O.
+    let _ = stream.set_nonblocking(false);
     configure_stream(&stream)?;
+    // Media sockets only: RST on close so a sender is not left half-open.
+    let sock = socket2::SockRef::from(&stream);
+    let _ = sock.set_linger(Some(Duration::ZERO));
     Ok(stream)
 }
 

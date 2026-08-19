@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver as MpscReceiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -166,6 +166,9 @@ struct Shared {
     video: DecodedVideoQueue,
     wire_depth: AtomicU32,
     outbound_meta: Mutex<Vec<String>>,
+    /// Cloned handles used to unblock I/O on [`ReceiverSession::disconnect`].
+    video_io: Mutex<Option<TcpStream>>,
+    audio_io: Mutex<Option<TcpStream>>,
 }
 
 impl Shared {
@@ -184,6 +187,40 @@ impl Shared {
     fn bump_reconnect(&self) {
         if let Ok(mut g) = self.stats.lock() {
             g.reconnects = g.reconnects.saturating_add(1);
+        }
+    }
+
+    fn install_io(&self, video: bool, stream: &TcpStream) {
+        let slot = if video {
+            &self.video_io
+        } else {
+            &self.audio_io
+        };
+        if let Ok(clone) = stream.try_clone()
+            && let Ok(mut g) = slot.lock()
+        {
+            *g = Some(clone);
+        }
+    }
+
+    fn clear_io(&self, video: bool) {
+        let slot = if video {
+            &self.video_io
+        } else {
+            &self.audio_io
+        };
+        if let Ok(mut g) = slot.lock() {
+            *g = None;
+        }
+    }
+
+    fn shutdown_io(&self) {
+        for slot in [&self.video_io, &self.audio_io] {
+            if let Ok(mut g) = slot.lock()
+                && let Some(stream) = g.take()
+            {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
         }
     }
 }
@@ -273,6 +310,8 @@ impl ReceiverSession {
             video: DecodedVideoQueue::new(VIDEO_DECODED_Q),
             wire_depth: AtomicU32::new(0),
             outbound_meta: Mutex::new(Vec::new()),
+            video_io: Mutex::new(None),
+            audio_io: Mutex::new(None),
         });
 
         let (video_wire_tx, video_wire_rx) = sync_channel::<WireVideo>(VIDEO_WIRE_Q);
@@ -439,6 +478,7 @@ impl ReceiverSession {
     pub fn disconnect(mut self) {
         self.shared.set_state(SessionState::Stopping);
         self.shared.stop.store(true, Ordering::Release);
+        self.shared.shutdown_io();
         // Wake any waiter on the latest-video condvar.
         self.shared.video.cv.notify_all();
         for j in self.joins.drain(..) {
@@ -452,6 +492,7 @@ impl Drop for ReceiverSession {
     fn drop(&mut self) {
         self.shared.set_state(SessionState::Stopping);
         self.shared.stop.store(true, Ordering::Release);
+        self.shared.shutdown_io();
         self.shared.video.cv.notify_all();
         while let Some(j) = self.joins.pop() {
             let _ = j.join();
@@ -524,6 +565,8 @@ fn socket_supervisor(
 
         shared.set_state(SessionState::Connected);
         backoff = RECONNECT_MIN;
+        let is_video = matches!(&role, SocketRole::Video { .. });
+        shared.install_io(is_video, &stream);
 
         match &role {
             SocketRole::Video {
@@ -545,6 +588,7 @@ fn socket_supervisor(
                 audio_reader_loop(stream, &shared, audio_tx);
             }
         }
+        shared.clear_io(is_video);
 
         if shared.stop.load(Ordering::Acquire) {
             break;
@@ -846,6 +890,7 @@ fn video_reader_loop(
             Err(OmtError::Protocol(ref msg)) => {
                 shared.set_error(format!("protocol: {msg}"));
                 record_drop_wire(&shared.stats);
+                channel.clear();
             }
             Err(e) => {
                 shared.set_error(format!("video I/O: {e}"));
