@@ -28,14 +28,18 @@ pub mod types;
 pub mod async_api;
 
 pub use color::{bgra_alpha_mask, bgra_to_rgba, bgra_to_rgba_into, uyvy_to_rgba};
-pub use discovery::{Discovery, DiscoveryClient, DiscoveryServer, OmtAddress};
+pub use discovery::{
+    Discovery, DiscoveryClient, DiscoveryServer, DiscoveryServerEvent, DiscoveryServerHandle,
+    DiscoveryServerSnapshot, OmtAddress, default_bind_addr,
+};
 pub use error::OmtError;
 pub use logging::init_logging;
 pub use protocol::metadata::{Metadata, PtzMetadata, parse_metadata};
 pub use receive::{ReceiverConfig, ReceiverSession, SessionState};
 pub use send::{Sender, SenderConfig};
 pub use settings::{
-    KEY_DISCOVERY_SERVER, KEY_NETWORK_PORT_END, KEY_NETWORK_PORT_START, OMT_STORAGE_PATH, Settings,
+    KEY_DISCOVERY_SERVER, KEY_NETWORK_PORT_END, KEY_NETWORK_PORT_START, OMT_STORAGE_PATH,
+    SETTINGS_FILE_NAME, Settings, settings_file_path, storage_dir,
 };
 pub use types::*;
 

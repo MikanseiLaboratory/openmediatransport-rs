@@ -77,3 +77,29 @@ fn missing_keys_use_defaults() {
     assert_eq!(settings.get_string("UnknownKey", "fallback"), "fallback");
     cleanup(&path);
 }
+
+#[test]
+fn unknown_keys_roundtrip_and_can_be_removed() {
+    let path = temp_settings_file();
+    fs::write(
+        &path,
+        "<Settings>\n  <DiscoveryServer>omt://10.0.0.1:6399</DiscoveryServer>\n  <VendorKey>keep-me</VendorKey>\n</Settings>\n",
+    )
+    .unwrap();
+
+    let mut settings = Settings::from_path(&path);
+    assert_eq!(settings.get_string("VendorKey", ""), "keep-me");
+    settings.set_string("VendorKey", "updated");
+    settings.set_string("Extra", "1");
+    settings.save().unwrap();
+
+    let mut loaded = Settings::from_path(&path);
+    assert_eq!(loaded.get_string("VendorKey", ""), "updated");
+    assert_eq!(loaded.get_string("Extra", ""), "1");
+    loaded.remove("Extra");
+    loaded.save().unwrap();
+    loaded.reload();
+    assert!(!loaded.contains_key("Extra"));
+    assert_eq!(loaded.get_string("VendorKey", ""), "updated");
+    cleanup(&path);
+}
