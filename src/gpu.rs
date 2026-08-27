@@ -1,8 +1,8 @@
 //! Optional wgpu texture I/O (`feature = "wgpu"`).
 //!
-//! Callers pass the `Device` / `Queue` they already own. Decode waits for GPU
-//! work before [`crate::ReceiverSession::try_recv_video_gpu`] returns, so the
-//! texture can be bound immediately.
+//! Callers pass the `Device` / `Queue` they already own. Decode submits on
+//! that queue and returns; later submits on the same queue can sample the
+//! texture. CPU readback still waits in [`vmx::gpu::read_texture_bgra`].
 
 use std::sync::Arc;
 
@@ -42,6 +42,7 @@ pub struct DecodedVideoGpuFrame {
     /// Color space used for YUV→RGB.
     pub color_space: ColorSpace,
     /// `Bgra8Unorm` texture (`TEXTURE_BINDING | COPY_DST | COPY_SRC`).
+    /// Later submits on the decode queue can sample it.
     pub texture: wgpu::Texture,
     /// Optional per-frame metadata XML.
     pub frame_metadata: Option<Arc<str>>,
