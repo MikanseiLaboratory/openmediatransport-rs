@@ -269,10 +269,13 @@ mod gpu {
         FrameType, GpuVideoContext, MediaFrame, ReceiverConfig, ReceiverSession, Sender,
         VideoTextureMeta,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
     use vmx::gpu;
+
+    /// wgpu headless device creation is not safe to race across tests on one adapter.
+    static GPU_TEST: Mutex<()> = Mutex::new(());
 
     fn headless_ctx() -> Option<(GpuVideoContext, wgpu::Device, wgpu::Queue)> {
         let (_, _, device, queue) = gpu::request_headless_device()?;
@@ -340,6 +343,7 @@ mod gpu {
 
     #[test]
     fn gpu_receive_matches_cpu_loopback() {
+        let _gpu = GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let Some((ctx, device, queue)) = headless_ctx() else {
             eprintln!("skip: no wgpu adapter");
             return;
@@ -408,8 +412,15 @@ mod gpu {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        let cpu_frame = cpu_got.expect("cpu decoded");
-        let gpu_frame = gpu_got.expect("gpu decoded");
+        let cpu_frame =
+            cpu_got.unwrap_or_else(|| panic!("cpu decoded; last_error={:?}", cpu.last_error()));
+        let gpu_frame = gpu_got.unwrap_or_else(|| {
+            panic!(
+                "gpu decoded; last_error={:?} stats={:?}",
+                gpu_rx.last_error(),
+                gpu_rx.statistics()
+            )
+        });
         assert!(
             gpu_rx.try_recv_video().is_none(),
             "CPU recv must be None in GPU mode"
@@ -434,6 +445,7 @@ mod gpu {
 
     #[test]
     fn gpu_preview_receive() {
+        let _gpu = GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let Some((ctx, device, queue)) = headless_ctx() else {
             eprintln!("skip: no wgpu adapter");
             return;
@@ -495,7 +507,13 @@ mod gpu {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        let frame = got.expect("gpu preview");
+        let frame = got.unwrap_or_else(|| {
+            panic!(
+                "gpu preview; last_error={:?} stats={:?}",
+                session.last_error(),
+                session.statistics()
+            )
+        });
         assert_eq!(frame.width, 16);
         assert_eq!(frame.height, 16);
         let pixels =
@@ -507,6 +525,7 @@ mod gpu {
 
     #[test]
     fn gpu_send_texture_matches_cpu_bgra() {
+        let _gpu = GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let Some((ctx, device, queue)) = headless_ctx() else {
             eprintln!("skip: no wgpu adapter");
             return;
