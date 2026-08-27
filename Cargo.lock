@@ -1100,7 +1100,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vmx"
 version = "0.1.0"
-source = "git+https://github.com/MikanseiLaboratory/vmx-rs?branch=feat%2Fwgpu-texture-io#0ad3ca79b46377e300a9560086ec1231dd38ea3b"
+source = "git+https://github.com/MikanseiLaboratory/vmx-rs#87eb2de7e036a3108cb9d40a53e513f48f2e940e"
 dependencies = [
  "bytemuck",
  "pollster",
