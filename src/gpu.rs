@@ -1,9 +1,8 @@
 //! Optional wgpu texture I/O (`feature = "wgpu"`).
 //!
-//! The crate never creates a `wgpu::Instance`. Callers pass the `Device` /
-//! `Queue` they already own (for example an eframe renderer). Decode waits
-//! for GPU work before [`crate::ReceiverSession::try_recv_video_gpu`] returns,
-//! so the texture can be bound immediately.
+//! Callers pass the `Device` / `Queue` they already own. Decode waits for GPU
+//! work before [`crate::ReceiverSession::try_recv_video_gpu`] returns, so the
+//! texture can be bound immediately.
 
 use std::sync::Arc;
 

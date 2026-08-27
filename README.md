@@ -22,7 +22,7 @@ Pure Rust implementation of **Open Media Transport (OMT)** — video, audio, and
 |---------|-------------|
 | *(default)* | Sync `Sender` / `ReceiverSession` / `Discovery` (VMX1 BGRA receive, optional 1/8 Preview) |
 | `tokio` | Async wrappers (`AsyncSender` / `AsyncReceiver` over `ReceiverSession`) |
-| `wgpu` | GPU texture receive/send on a caller-owned `wgpu::Device` (`GpuVideoContext`, `try_recv_video_gpu`, `send_video_texture`). Does **not** create a wgpu Instance. 8-bit BGRA only; no DX12 shared handles, alpha, or 10-bit. |
+| `wgpu` | GPU texture receive/send on a caller-owned `wgpu::Device` (`GpuVideoContext`, `try_recv_video_gpu`, `send_video_texture`). 8-bit `Bgra8Unorm`. |
 
 Codec SIMD / rayon details: [`vmx-rs` README](https://github.com/MikanseiLaboratory/vmx-rs).
 Callers can inspect the selected VMX path via `vmx::Codec::simd_path()`
@@ -32,8 +32,8 @@ Callers can inspect the selected VMX path via `vmx::Codec::simd_path()`
 When `wgpu` is enabled, pass `Arc<wgpu::Device>` + `Arc<wgpu::Queue>` in
 `ReceiverConfig.gpu` at connect. The decode thread submits compute and waits
 (`poll(WaitForSubmissionIndex)`) before a frame is published, so the returned
-texture is ready to bind. `try_recv_video` then returns `None` (CPU pixels are
-not produced). Send with `Sender::send_video_texture`.
+texture is ready to bind. Receive with `try_recv_video_gpu`; send with
+`Sender::send_video_texture`.
 
 ## MSRV
 

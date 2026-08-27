@@ -549,9 +549,9 @@ impl Sender {
             )));
         }
         let quality = self.effective_quality();
-        let (bitstream, elapsed) =
-            self.video_encoder
-                .encode_from_texture(ctx, texture, &meta, quality)?;
+        let (bitstream, elapsed) = self
+            .video_encoder
+            .encode_from_texture(ctx, texture, &meta, quality)?;
         self.stats.record_codec(elapsed);
         let aspect = if meta.height == 0 {
             1.0

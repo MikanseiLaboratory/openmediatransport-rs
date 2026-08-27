@@ -70,11 +70,8 @@ pub struct ReceiverConfig {
     pub connect_timeout: Duration,
     /// Automatically reconnect after socket failures (250 ms … 2 s backoff).
     pub auto_reconnect: bool,
-    /// When set, VMX decode writes a `Bgra8Unorm` texture on this device.
-    ///
-    /// [`ReceiverSession::try_recv_video`] then returns `None`; use
-    /// [`ReceiverSession::try_recv_video_gpu`] instead. CPU pixels are not
-    /// produced. The crate does not create a `wgpu::Instance`.
+    /// Host GPU for VMX texture decode. Frames are published as
+    /// [`DecodedVideoGpuFrame`] via [`ReceiverSession::try_recv_video_gpu`].
     #[cfg(feature = "wgpu")]
     pub gpu: Option<GpuVideoContext>,
 }
@@ -510,10 +507,9 @@ impl ReceiverSession {
         self.shared.last_error.lock().ok().and_then(|g| g.clone())
     }
 
-    /// Non-blocking poll for the next decoded video frame (latest-wins slot).
+    /// Non-blocking poll for the next decoded BGRA video frame (latest-wins slot).
     ///
-    /// When GPU texture receive is enabled (`ReceiverConfig.gpu`), this always
-    /// returns `None`; use the GPU receive methods instead.
+    /// With [`ReceiverConfig::gpu`] set, frames arrive via [`Self::try_recv_video_gpu`].
     pub fn try_recv_video(&self) -> Option<DecodedVideoFrame> {
         #[cfg(feature = "wgpu")]
         if self.config.gpu.is_some() {
@@ -522,10 +518,9 @@ impl ReceiverSession {
         self.shared.video.try_take()
     }
 
-    /// Blocking receive of the next decoded video frame (or `None` on timeout / shutdown).
+    /// Blocking receive of the next decoded BGRA video frame (or `None` on timeout / shutdown).
     ///
-    /// When GPU texture receive is enabled (`ReceiverConfig.gpu`), this always
-    /// returns `None`.
+    /// With [`ReceiverConfig::gpu`] set, frames arrive via [`Self::recv_video_gpu_timeout`].
     pub fn recv_video_timeout(&self, timeout: Duration) -> Option<DecodedVideoFrame> {
         #[cfg(feature = "wgpu")]
         if self.config.gpu.is_some() {
@@ -537,7 +532,7 @@ impl ReceiverSession {
     /// Non-blocking poll for a GPU-decoded video texture.
     ///
     /// GPU work has already been waited on the decode thread; the texture is
-    /// ready to bind. Only produces frames when [`ReceiverConfig::gpu`] was set.
+    /// ready to bind. Requires [`ReceiverConfig::gpu`] at connect.
     #[cfg(feature = "wgpu")]
     pub fn try_recv_video_gpu(&self) -> Option<DecodedVideoGpuFrame> {
         self.shared.gpu_video.try_take()
