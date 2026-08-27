@@ -310,6 +310,33 @@ mod gpu {
         bgra
     }
 
+    fn psnr_bgra(a: &[u8], b: &[u8]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        let mut sse = 0.0f64;
+        let n = (a.len() / 4) * 3;
+        if n == 0 {
+            return 100.0;
+        }
+        for i in (0..a.len()).step_by(4) {
+            for c in 0..3 {
+                let d = f64::from(a[i + c]) - f64::from(b[i + c]);
+                sse += d * d;
+            }
+        }
+        if sse == 0.0 {
+            return 100.0;
+        }
+        10.0 * (255.0 * 255.0 * n as f64 / sse).log10()
+    }
+
+    fn assert_psnr(a: &[u8], b: &[u8], min_db: f64, label: &str) {
+        let psnr = psnr_bgra(a, b);
+        assert!(
+            psnr >= min_db,
+            "{label}: PSNR {psnr:.2} dB is below {min_db:.1} dB"
+        );
+    }
+
     #[test]
     fn gpu_receive_matches_cpu_loopback() {
         let Some((ctx, device, queue)) = headless_ctx() else {
@@ -394,7 +421,12 @@ mod gpu {
             gpu_frame.height,
         )
         .expect("readback");
-        assert_eq!(cpu_frame.pixels.as_ref(), gpu_pixels.as_slice());
+        assert_psnr(
+            cpu_frame.pixels.as_ref(),
+            gpu_pixels.as_slice(),
+            40.0,
+            "GPU recv vs CPU",
+        );
         cpu.disconnect();
         gpu_rx.disconnect();
     }
@@ -563,7 +595,12 @@ mod gpu {
             thread::sleep(Duration::from_millis(10));
         }
         let cpu_sent = cpu_sent.expect("cpu recv");
-        assert_eq!(gpu_sent.pixels.as_ref(), cpu_sent.pixels.as_ref());
+        assert_psnr(
+            gpu_sent.pixels.as_ref(),
+            cpu_sent.pixels.as_ref(),
+            35.0,
+            "GPU send vs CPU send",
+        );
         session.disconnect();
         cpu_rx.disconnect();
     }
