@@ -36,3 +36,19 @@ jobs:
       # Network loopback tests bind 6400..=6600; serialize to avoid port races
       # (especially on Windows where SO_REUSEADDR can steal accepts).
       - run: cargo test --tests ${{ matrix.features }} -- --test-threads=1
+
+  clippy-test-wgpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        features: ["--features wgpu", "--features wgpu,tokio"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: clippy
+      - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+      - run: cargo test --tests ${{ matrix.features }} -- --test-threads=1

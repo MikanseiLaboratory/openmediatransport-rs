@@ -262,3 +262,309 @@ fn vmx_preview_loopback_decodes_eighth_bgra() {
     assert_eq!(frame.pixels.len(), 16 * 16 * 4);
     session.disconnect();
 }
+
+#[cfg(feature = "wgpu")]
+mod gpu {
+    use openmediatransport::{
+        FrameType, GpuVideoContext, MediaFrame, ReceiverConfig, ReceiverSession, Sender,
+        VideoTextureMeta,
+    };
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+    use vmx::gpu;
+
+    fn headless_ctx() -> Option<(GpuVideoContext, wgpu::Device, wgpu::Queue)> {
+        let (_, _, device, queue) = gpu::request_headless_device()?;
+        let ctx = GpuVideoContext {
+            device: Arc::new(device.clone()),
+            queue: Arc::new(queue.clone()),
+        };
+        Some((ctx, device, queue))
+    }
+
+    fn wait_video_sub(sender: &mut Sender) {
+        for _ in 0..100 {
+            let _ = sender.poll_accept();
+            let _ = sender.poll_peer_metadata();
+            if sender.video_subscribed() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        sender.force_subscribe(true, false, false);
+    }
+
+    fn sample_bgra(width: i32, height: i32) -> Vec<u8> {
+        let stride = width as usize * 4;
+        let mut bgra = vec![0u8; stride * height as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let o = y * stride + x * 4;
+                bgra[o] = (x.wrapping_mul(13) % 220 + 16) as u8;
+                bgra[o + 1] = (y.wrapping_mul(7) % 200 + 20) as u8;
+                bgra[o + 2] = ((x + y) % 180 + 30) as u8;
+                bgra[o + 3] = 255;
+            }
+        }
+        bgra
+    }
+
+    #[test]
+    fn gpu_receive_matches_cpu_loopback() {
+        let Some((ctx, device, queue)) = headless_ctx() else {
+            eprintln!("skip: no wgpu adapter");
+            return;
+        };
+
+        let mut sender = Sender::create("GpuRxSrc", FrameType::VIDEO).expect("sender");
+        let port = sender.port();
+        let url = format!("omt://127.0.0.1:{port}");
+        let cpu = ReceiverSession::connect(
+            &url,
+            ReceiverConfig {
+                frame_types: FrameType::VIDEO,
+                connect_timeout: Duration::from_secs(2),
+                ..ReceiverConfig::default()
+            },
+        )
+        .expect("cpu rx");
+        let gpu_rx = ReceiverSession::connect(
+            &url,
+            ReceiverConfig {
+                frame_types: FrameType::VIDEO,
+                connect_timeout: Duration::from_secs(2),
+                gpu: Some(ctx),
+                ..ReceiverConfig::default()
+            },
+        )
+        .expect("gpu rx");
+
+        wait_video_sub(&mut sender);
+
+        let width = 64i32;
+        let height = 64i32;
+        let stride = (width as usize) * 4;
+        let bgra = sample_bgra(width, height);
+        let frame = MediaFrame {
+            frame_type: FrameType::VIDEO,
+            timestamp: 30_000_000,
+            codec: openmediatransport::Codec::Bgra as i32,
+            width,
+            height,
+            stride: stride as i32,
+            frame_rate_n: 60,
+            frame_rate_d: 1,
+            data: bgra,
+            ..Default::default()
+        };
+        sender.send_video(frame).expect("send");
+
+        let mut cpu_got = None;
+        let mut gpu_got = None;
+        for _ in 0..300 {
+            if cpu_got.is_none()
+                && let Some(f) = cpu.try_recv_video()
+                && f.timestamp == 30_000_000
+            {
+                cpu_got = Some(f);
+            }
+            if gpu_got.is_none()
+                && let Some(f) = gpu_rx.try_recv_video_gpu()
+                && f.timestamp == 30_000_000
+            {
+                gpu_got = Some(f);
+            }
+            if cpu_got.is_some() && gpu_got.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let cpu_frame = cpu_got.expect("cpu decoded");
+        let gpu_frame = gpu_got.expect("gpu decoded");
+        assert!(
+            gpu_rx.try_recv_video().is_none(),
+            "CPU recv must be None in GPU mode"
+        );
+        let gpu_pixels = gpu::read_texture_bgra(
+            &device,
+            &queue,
+            &gpu_frame.texture,
+            gpu_frame.width,
+            gpu_frame.height,
+        )
+        .expect("readback");
+        assert_eq!(cpu_frame.pixels.as_ref(), gpu_pixels.as_slice());
+        cpu.disconnect();
+        gpu_rx.disconnect();
+    }
+
+    #[test]
+    fn gpu_preview_receive() {
+        let Some((ctx, device, queue)) = headless_ctx() else {
+            eprintln!("skip: no wgpu adapter");
+            return;
+        };
+
+        let mut sender = Sender::create("GpuPreviewSrc", FrameType::VIDEO).expect("sender");
+        let port = sender.port();
+        let url = format!("omt://127.0.0.1:{port}");
+        let session = ReceiverSession::connect(
+            url,
+            ReceiverConfig {
+                frame_types: FrameType::VIDEO,
+                preview: true,
+                connect_timeout: Duration::from_secs(2),
+                gpu: Some(ctx),
+                ..ReceiverConfig::default()
+            },
+        )
+        .expect("session");
+
+        for _ in 0..100 {
+            let _ = sender.poll_accept();
+            let _ = sender.poll_peer_metadata();
+            if sender.video_subscribed() && sender.preview() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !sender.video_subscribed() {
+            sender.force_subscribe(true, false, false);
+        }
+        if !sender.preview() {
+            sender.force_preview(true);
+        }
+
+        let width = 128i32;
+        let height = 128i32;
+        let frame = MediaFrame {
+            frame_type: FrameType::VIDEO,
+            timestamp: 40_000_000,
+            codec: openmediatransport::Codec::Bgra as i32,
+            width,
+            height,
+            stride: (width as usize * 4) as i32,
+            frame_rate_n: 60,
+            frame_rate_d: 1,
+            data: sample_bgra(width, height),
+            ..Default::default()
+        };
+        sender.send_video(frame).expect("send");
+
+        let mut got = None;
+        for _ in 0..300 {
+            if let Some(f) = session.try_recv_video_gpu()
+                && f.timestamp == 40_000_000
+            {
+                got = Some(f);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let frame = got.expect("gpu preview");
+        assert_eq!(frame.width, 16);
+        assert_eq!(frame.height, 16);
+        let pixels =
+            gpu::read_texture_bgra(&device, &queue, &frame.texture, frame.width, frame.height)
+                .expect("readback");
+        assert_eq!(pixels.len(), 16 * 16 * 4);
+        session.disconnect();
+    }
+
+    #[test]
+    fn gpu_send_texture_matches_cpu_bgra() {
+        let Some((ctx, device, queue)) = headless_ctx() else {
+            eprintln!("skip: no wgpu adapter");
+            return;
+        };
+
+        let mut sender = Sender::create("GpuTxSrc", FrameType::VIDEO).expect("sender");
+        let port = sender.port();
+        let url = format!("omt://127.0.0.1:{port}");
+        let session = ReceiverSession::connect(
+            &url,
+            ReceiverConfig {
+                frame_types: FrameType::VIDEO,
+                connect_timeout: Duration::from_secs(2),
+                ..ReceiverConfig::default()
+            },
+        )
+        .expect("rx");
+        wait_video_sub(&mut sender);
+
+        let width = 32i32;
+        let height = 32i32;
+        let stride = (width as usize) * 4;
+        let bgra = sample_bgra(width, height);
+        let tex = gpu::upload_bgra_texture(&device, &queue, width as u32, height as u32, &bgra);
+
+        sender
+            .send_video_texture(
+                &ctx,
+                &tex,
+                VideoTextureMeta {
+                    width: width as u32,
+                    height: height as u32,
+                    timestamp: 50_000_000,
+                    frame_rate_n: 60,
+                    frame_rate_d: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("send texture");
+
+        let mut gpu_sent = None;
+        for _ in 0..300 {
+            if let Some(f) = session.try_recv_video()
+                && f.timestamp == 50_000_000
+            {
+                gpu_sent = Some(f);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let gpu_sent = gpu_sent.expect("recv after GPU encode");
+
+        let mut sender2 = Sender::create("GpuTxSrcCpu", FrameType::VIDEO).expect("sender2");
+        let url2 = format!("omt://127.0.0.1:{}", sender2.port());
+        let cpu_rx = ReceiverSession::connect(
+            url2,
+            ReceiverConfig {
+                frame_types: FrameType::VIDEO,
+                connect_timeout: Duration::from_secs(2),
+                ..ReceiverConfig::default()
+            },
+        )
+        .expect("cpu rx");
+        wait_video_sub(&mut sender2);
+        sender2
+            .send_video(MediaFrame {
+                frame_type: FrameType::VIDEO,
+                timestamp: 50_000_000,
+                codec: openmediatransport::Codec::Bgra as i32,
+                width,
+                height,
+                stride: stride as i32,
+                frame_rate_n: 60,
+                frame_rate_d: 1,
+                data: bgra,
+                ..Default::default()
+            })
+            .expect("cpu send");
+        let mut cpu_sent = None;
+        for _ in 0..300 {
+            if let Some(f) = cpu_rx.try_recv_video()
+                && f.timestamp == 50_000_000
+            {
+                cpu_sent = Some(f);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let cpu_sent = cpu_sent.expect("cpu recv");
+        assert_eq!(gpu_sent.pixels.as_ref(), cpu_sent.pixels.as_ref());
+        session.disconnect();
+        cpu_rx.disconnect();
+    }
+}

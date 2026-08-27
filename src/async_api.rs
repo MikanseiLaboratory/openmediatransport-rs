@@ -83,6 +83,17 @@ impl AsyncSender {
         tokio::task::block_in_place(|| self.inner.send_video(frame))
     }
 
+    /// Encode a GPU texture to VMX1 and send. Encode uses `block_in_place`.
+    #[cfg(feature = "wgpu")]
+    pub async fn send_video_texture(
+        &mut self,
+        ctx: &crate::GpuVideoContext,
+        texture: &wgpu::Texture,
+        meta: crate::VideoTextureMeta,
+    ) -> Result<(), OmtError> {
+        tokio::task::block_in_place(|| self.inner.send_video_texture(ctx, texture, meta))
+    }
+
     /// Send an audio frame asynchronously.
     pub async fn send_audio(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
         tokio::task::block_in_place(|| self.inner.send_audio(frame))
@@ -188,6 +199,26 @@ impl AsyncReceiver {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if let Some(frame) = self.inner.try_recv_video() {
+                return Some(frame);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Wait up to `timeout_ms` for the next GPU-decoded video texture.
+    #[cfg(feature = "wgpu")]
+    pub async fn recv_video_gpu(&mut self, timeout_ms: i32) -> Option<crate::DecodedVideoGpuFrame> {
+        let timeout = if timeout_ms < 0 {
+            Duration::from_secs(3600)
+        } else {
+            Duration::from_millis(timeout_ms as u64)
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(frame) = self.inner.try_recv_video_gpu() {
                 return Some(frame);
             }
             if tokio::time::Instant::now() >= deadline {
