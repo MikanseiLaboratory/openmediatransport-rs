@@ -1084,7 +1084,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vmx"
 version = "0.1.0"
-source = "git+https://github.com/MikanseiLaboratory/vmx-rs?rev=d528f625fceb5d2d8aec0e006d03c7f1f5a36366#d528f625fceb5d2d8aec0e006d03c7f1f5a36366"
+source = "git+https://github.com/MikanseiLaboratory/vmx-rs#ea429b39af848cd8a46cb41c77434ff031c8dd5c"
 dependencies = [
  "bytemuck",
  "pollster",
