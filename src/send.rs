@@ -520,6 +520,64 @@ impl Sender {
         self.broadcast(&assembled)
     }
 
+    /// Encode a `Bgra8Unorm` (or `Rgba8Unorm`) texture on `ctx` and send VMX1.
+    ///
+    /// Texture size must match [`crate::VideoTextureMeta`] width/height.
+    /// Quality follows [`Self::effective_quality`]. Encode runs on the calling
+    /// thread and waits for GPU readback (same as CPU `encode_raw`).
+    #[cfg(feature = "wgpu")]
+    pub fn send_video_texture(
+        &mut self,
+        ctx: &crate::gpu::GpuVideoContext,
+        texture: &wgpu::Texture,
+        meta: crate::gpu::VideoTextureMeta,
+    ) -> Result<(), OmtError> {
+        if !self.subscribed.video {
+            return Ok(());
+        }
+        let size = texture.size();
+        if size.width != meta.width || size.height != meta.height {
+            return Err(OmtError::InvalidArgument(format!(
+                "texture size {}x{} != meta {}x{}",
+                size.width, size.height, meta.width, meta.height
+            )));
+        }
+        if meta.width < 16 || meta.height < 16 {
+            return Err(OmtError::InvalidArgument(format!(
+                "video frame too small: {}x{}",
+                meta.width, meta.height
+            )));
+        }
+        let quality = self.effective_quality();
+        let (bitstream, elapsed) = self
+            .video_encoder
+            .encode_from_texture(ctx, texture, &meta, quality)?;
+        self.stats.record_codec(elapsed);
+        let aspect = if meta.height == 0 {
+            1.0
+        } else {
+            meta.width as f32 / meta.height as f32
+        };
+        let frame = MediaFrame {
+            frame_type: FrameType::VIDEO,
+            timestamp: meta.timestamp,
+            codec: Codec::Vmx1 as i32,
+            width: meta.width as i32,
+            height: meta.height as i32,
+            stride: 0,
+            flags: meta.flags,
+            frame_rate_n: meta.frame_rate_n,
+            frame_rate_d: meta.frame_rate_d,
+            aspect_ratio: aspect,
+            color_space: meta.color_space,
+            data: bitstream,
+            frame_metadata: meta.frame_metadata,
+            ..Default::default()
+        };
+        let assembled = self.build_frame(frame)?;
+        self.broadcast(&assembled)
+    }
+
     /// Send an audio frame to subscribed peers (no-op if none subscribed).
     pub fn send_audio(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
         if !self.subscribed.audio {

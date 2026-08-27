@@ -25,6 +25,9 @@ use crate::types::{
     MetadataFrame, Quality, SessionStatistics, Tally, VIDEO_MAX_SIZE, VideoFlags,
 };
 
+#[cfg(feature = "wgpu")]
+use crate::gpu::{DecodedVideoGpuFrame, GpuVideoContext};
+
 /// Wire-compressed video queue depth (backpressure → drop).
 const VIDEO_WIRE_Q: usize = 3;
 /// Decoded video depth-1 FIFO (latest-wins when full).
@@ -67,6 +70,10 @@ pub struct ReceiverConfig {
     pub connect_timeout: Duration,
     /// Automatically reconnect after socket failures (250 ms … 2 s backoff).
     pub auto_reconnect: bool,
+    /// Host GPU for VMX texture decode. Frames are published as
+    /// [`DecodedVideoGpuFrame`] via [`ReceiverSession::try_recv_video_gpu`].
+    #[cfg(feature = "wgpu")]
+    pub gpu: Option<GpuVideoContext>,
 }
 
 impl Default for ReceiverConfig {
@@ -77,6 +84,8 @@ impl Default for ReceiverConfig {
             preview: false,
             connect_timeout: Duration::from_secs(5),
             auto_reconnect: true,
+            #[cfg(feature = "wgpu")]
+            gpu: None,
         }
     }
 }
@@ -158,12 +167,80 @@ impl DecodedVideoQueue {
     }
 }
 
+#[cfg(feature = "wgpu")]
+struct DecodedGpuQueue {
+    slot: Mutex<VecDeque<DecodedVideoGpuFrame>>,
+    cv: Condvar,
+    depth: AtomicU32,
+    overwrites: AtomicU64,
+    cap: usize,
+}
+
+#[cfg(feature = "wgpu")]
+impl DecodedGpuQueue {
+    fn new(cap: usize) -> Self {
+        Self {
+            slot: Mutex::new(VecDeque::with_capacity(cap)),
+            cv: Condvar::new(),
+            depth: AtomicU32::new(0),
+            overwrites: AtomicU64::new(0),
+            cap: cap.max(1),
+        }
+    }
+
+    fn publish(&self, frame: DecodedVideoGpuFrame, stats: &Mutex<SessionStatistics>) {
+        let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        while g.len() >= self.cap {
+            g.pop_front();
+            self.overwrites.fetch_add(1, Ordering::Relaxed);
+            record_drop_decode(stats);
+        }
+        g.push_back(frame);
+        self.depth.store(g.len() as u32, Ordering::Relaxed);
+        self.cv.notify_one();
+    }
+
+    fn try_take(&self) -> Option<DecodedVideoGpuFrame> {
+        let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        let out = g.pop_front();
+        self.depth.store(g.len() as u32, Ordering::Relaxed);
+        out
+    }
+
+    fn wait_take(&self, timeout: Duration, stop: &AtomicBool) -> Option<DecodedVideoGpuFrame> {
+        let deadline = Instant::now() + timeout;
+        let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(frame) = g.pop_front() {
+                self.depth.store(g.len() as u32, Ordering::Relaxed);
+                return Some(frame);
+            }
+            if stop.load(Ordering::Acquire) {
+                return None;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            let (guard, _) = self
+                .cv
+                .wait_timeout(g, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|e| e.into_inner());
+            g = guard;
+        }
+    }
+}
+
 struct Shared {
     stop: AtomicBool,
     stats: Mutex<SessionStatistics>,
     state: Mutex<SessionState>,
     last_error: Mutex<Option<String>>,
     video: DecodedVideoQueue,
+    #[cfg(feature = "wgpu")]
+    gpu: Option<GpuVideoContext>,
+    #[cfg(feature = "wgpu")]
+    gpu_video: DecodedGpuQueue,
     wire_depth: AtomicU32,
     outbound_meta: Mutex<Vec<String>>,
     /// Cloned handles used to unblock I/O on [`ReceiverSession::disconnect`].
@@ -308,6 +385,10 @@ impl ReceiverSession {
             state: Mutex::new(SessionState::Connected),
             last_error: Mutex::new(None),
             video: DecodedVideoQueue::new(VIDEO_DECODED_Q),
+            #[cfg(feature = "wgpu")]
+            gpu: config.gpu.clone(),
+            #[cfg(feature = "wgpu")]
+            gpu_video: DecodedGpuQueue::new(VIDEO_DECODED_Q),
             wire_depth: AtomicU32::new(0),
             outbound_meta: Mutex::new(Vec::new()),
             video_io: Mutex::new(None),
@@ -426,14 +507,41 @@ impl ReceiverSession {
         self.shared.last_error.lock().ok().and_then(|g| g.clone())
     }
 
-    /// Non-blocking poll for the next decoded video frame (latest-wins slot).
+    /// Non-blocking poll for the next decoded BGRA video frame (latest-wins slot).
+    ///
+    /// With [`ReceiverConfig::gpu`] set, frames arrive via [`Self::try_recv_video_gpu`].
     pub fn try_recv_video(&self) -> Option<DecodedVideoFrame> {
+        #[cfg(feature = "wgpu")]
+        if self.config.gpu.is_some() {
+            return None;
+        }
         self.shared.video.try_take()
     }
 
-    /// Blocking receive of the next decoded video frame (or `None` on timeout / shutdown).
+    /// Blocking receive of the next decoded BGRA video frame (or `None` on timeout / shutdown).
+    ///
+    /// With [`ReceiverConfig::gpu`] set, frames arrive via [`Self::recv_video_gpu_timeout`].
     pub fn recv_video_timeout(&self, timeout: Duration) -> Option<DecodedVideoFrame> {
+        #[cfg(feature = "wgpu")]
+        if self.config.gpu.is_some() {
+            return None;
+        }
         self.shared.video.wait_take(timeout, &self.shared.stop)
+    }
+
+    /// Non-blocking poll for a GPU-decoded video texture.
+    ///
+    /// GPU work has already been waited on the decode thread; the texture is
+    /// ready to bind. Requires [`ReceiverConfig::gpu`] at connect.
+    #[cfg(feature = "wgpu")]
+    pub fn try_recv_video_gpu(&self) -> Option<DecodedVideoGpuFrame> {
+        self.shared.gpu_video.try_take()
+    }
+
+    /// Blocking receive of the next GPU-decoded video texture.
+    #[cfg(feature = "wgpu")]
+    pub fn recv_video_gpu_timeout(&self, timeout: Duration) -> Option<DecodedVideoGpuFrame> {
+        self.shared.gpu_video.wait_take(timeout, &self.shared.stop)
     }
 
     /// Non-blocking poll for decoded audio.
@@ -470,7 +578,18 @@ impl ReceiverSession {
     pub fn statistics(&self) -> SessionStatistics {
         let mut s = self.shared.stats.lock().map(|g| *g).unwrap_or_default();
         s.wire_queue_depth = self.shared.wire_depth.load(Ordering::Relaxed);
-        s.decoded_queue_depth = self.shared.video.depth.load(Ordering::Relaxed);
+        #[cfg(feature = "wgpu")]
+        {
+            s.decoded_queue_depth = if self.config.gpu.is_some() {
+                self.shared.gpu_video.depth.load(Ordering::Relaxed)
+            } else {
+                self.shared.video.depth.load(Ordering::Relaxed)
+            };
+        }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            s.decoded_queue_depth = self.shared.video.depth.load(Ordering::Relaxed);
+        }
         s
     }
 
@@ -1078,6 +1197,12 @@ fn decode_audio_frame(
 }
 
 fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
+    #[cfg(feature = "wgpu")]
+    if let Some(ctx) = shared.gpu.clone() {
+        video_decode_loop_gpu(shared, wire_rx, ctx);
+        return;
+    }
+
     let mut codec: Option<vmx::Codec> = None;
     let mut decode_buf = Vec::new();
     let mut pool = BufferPool::video();
@@ -1138,6 +1263,142 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
     }
 }
 
+#[cfg(feature = "wgpu")]
+fn video_decode_loop_gpu(
+    shared: Arc<Shared>,
+    wire_rx: MpscReceiver<WireVideo>,
+    ctx: GpuVideoContext,
+) {
+    let mut codec: Option<vmx::Codec> = None;
+    let mut pool = BufferPool::video();
+
+    while !shared.stop.load(Ordering::Acquire) {
+        let wire = match wire_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(w) => {
+                let _ = shared
+                    .wire_depth
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                        Some(v.saturating_sub(1))
+                    });
+                w
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        let age_us = wire.enqueued_at.elapsed().as_micros() as u64;
+        let t0 = Instant::now();
+        let WireVideo {
+            timestamp,
+            width,
+            height,
+            frame_rate_n,
+            frame_rate_d,
+            color_space,
+            preview,
+            payload,
+            metadata,
+            ..
+        } = wire;
+        match decode_vmx_texture(
+            width,
+            height,
+            color_space,
+            timestamp,
+            frame_rate_n,
+            frame_rate_d,
+            preview,
+            metadata,
+            payload.as_slice(),
+            &mut codec,
+            &ctx,
+        ) {
+            Ok(frame) => {
+                let ns = t0.elapsed().as_nanos() as u64;
+                record_codec_time(&shared.stats, ns, age_us);
+                shared.gpu_video.publish(frame, &shared.stats);
+            }
+            Err(e) => {
+                shared.set_error(format!("decode: {e}"));
+                record_drop_decode(&shared.stats);
+                codec = None;
+            }
+        }
+        pool.give(payload);
+    }
+}
+
+#[cfg(feature = "wgpu")]
+#[allow(clippy::too_many_arguments)]
+fn decode_vmx_texture(
+    width: i32,
+    height: i32,
+    color_space: ColorSpace,
+    timestamp: i64,
+    frame_rate_n: i32,
+    frame_rate_d: i32,
+    preview: bool,
+    metadata: Option<Arc<str>>,
+    payload: &[u8],
+    cached: &mut Option<vmx::Codec>,
+    ctx: &GpuVideoContext,
+) -> Result<DecodedVideoGpuFrame, OmtError> {
+    if width < vmx::MIN_WIDTH || height < vmx::MIN_HEIGHT {
+        return Err(OmtError::Codec("VMX dimensions below minimum".into()));
+    }
+    let vmx_cs = map_vmx_color_space(color_space);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reuse = cached.as_ref().is_some_and(|c| {
+            let s = c.size();
+            s.width == width && s.height == height
+        });
+        if !reuse {
+            *cached = Some(vmx::Codec::new(vmx::Config {
+                width,
+                height,
+                profile: vmx::Profile::OmtSq,
+                color_space: vmx_cs,
+            })?);
+        } else if let Some(c) = cached.as_mut() {
+            c.set_color_space(vmx_cs);
+        }
+        let codec = cached.as_mut().unwrap();
+        codec.load_from(payload)?;
+        let gpu = if preview {
+            codec.decode_preview_to_texture(&ctx.device, &ctx.queue)?
+        } else {
+            codec.decode_to_texture(&ctx.device, &ctx.queue)?
+        };
+        Ok::<_, OmtError>(DecodedVideoGpuFrame {
+            width: gpu.width,
+            height: gpu.height,
+            timestamp,
+            frame_rate_n,
+            frame_rate_d,
+            color_space,
+            texture: gpu.texture,
+            frame_metadata: metadata,
+        })
+    }));
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => {
+            *cached = None;
+            Err(OmtError::Codec("VMX GPU decode panicked".into()))
+        }
+    }
+}
+
+fn map_vmx_color_space(color_space: ColorSpace) -> vmx::ColorSpace {
+    match color_space {
+        ColorSpace::Bt601 => vmx::ColorSpace::Bt601,
+        ColorSpace::Bt709 => vmx::ColorSpace::Bt709,
+        ColorSpace::Undefined => vmx::ColorSpace::Undefined,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decode_vmx_bgra(
     width: i32,
@@ -1155,11 +1416,7 @@ fn decode_vmx_bgra(
     if width < vmx::MIN_WIDTH || height < vmx::MIN_HEIGHT {
         return Err(OmtError::Codec("VMX dimensions below minimum".into()));
     }
-    let vmx_cs = match color_space {
-        ColorSpace::Bt601 => vmx::ColorSpace::Bt601,
-        ColorSpace::Bt709 => vmx::ColorSpace::Bt709,
-        ColorSpace::Undefined => vmx::ColorSpace::Undefined,
-    };
+    let vmx_cs = map_vmx_color_space(color_space);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let reuse = cached.as_ref().is_some_and(|c| {

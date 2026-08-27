@@ -123,6 +123,25 @@ impl VideoEncoder {
         Ok((bitstream, t0.elapsed()))
     }
 
+    /// Encode a GPU texture to a VMX1 bitstream (`feature = "wgpu"`).
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn encode_from_texture(
+        &mut self,
+        ctx: &crate::GpuVideoContext,
+        texture: &wgpu::Texture,
+        meta: &crate::VideoTextureMeta,
+        quality: Quality,
+    ) -> Result<(Vec<u8>, Duration), OmtError> {
+        let profile = vmx_profile(quality);
+        let cs = map_color_space(meta.color_space);
+        self.ensure_codec(meta.width as i32, meta.height as i32, profile, cs)?;
+        let vmx = self.codec.as_mut().expect("codec after ensure");
+        let t0 = Instant::now();
+        vmx.encode_from_texture(&ctx.device, &ctx.queue, texture)?;
+        let bitstream = self.save_bitstream()?;
+        Ok((bitstream, t0.elapsed()))
+    }
+
     fn ensure_codec(
         &mut self,
         width: i32,

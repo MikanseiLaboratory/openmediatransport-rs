@@ -26,6 +26,11 @@ pub mod types;
 
 #[cfg(feature = "tokio")]
 pub mod async_api;
+#[cfg(feature = "wgpu")]
+mod gpu;
+
+#[cfg(feature = "wgpu")]
+pub use gpu::{DecodedVideoGpuFrame, GpuVideoContext, VideoTextureMeta};
 
 pub use color::{bgra_alpha_mask, bgra_to_rgba, bgra_to_rgba_into, uyvy_to_rgba};
 pub use discovery::{
