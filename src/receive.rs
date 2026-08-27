@@ -72,6 +72,9 @@ pub struct ReceiverConfig {
     pub auto_reconnect: bool,
     /// Host GPU for VMX texture decode. Frames are published as
     /// [`DecodedVideoGpuFrame`] via [`ReceiverSession::try_recv_video_gpu`].
+    /// GPU work is submitted on this queue; later submits on the same queue
+    /// can sample the texture. CPU readback still waits in
+    /// [`vmx::gpu::read_texture_bgra`].
     #[cfg(feature = "wgpu")]
     pub gpu: Option<GpuVideoContext>,
 }
@@ -531,8 +534,10 @@ impl ReceiverSession {
 
     /// Non-blocking poll for a GPU-decoded video texture.
     ///
-    /// GPU work has already been waited on the decode thread; the texture is
-    /// ready to bind. Requires [`ReceiverConfig::gpu`] at connect.
+    /// Decode has been submitted on the [`ReceiverConfig::gpu`] queue; later
+    /// submits on that queue can sample the texture. CPU readback still waits
+    /// in [`vmx::gpu::read_texture_bgra`]. Requires [`ReceiverConfig::gpu`] at
+    /// connect.
     #[cfg(feature = "wgpu")]
     pub fn try_recv_video_gpu(&self) -> Option<DecodedVideoGpuFrame> {
         self.shared.gpu_video.try_take()

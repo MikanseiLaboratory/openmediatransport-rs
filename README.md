@@ -30,10 +30,10 @@ Callers can inspect the selected VMX path via `vmx::Codec::simd_path()`
 `simd_capabilities()`.
 
 When `wgpu` is enabled, pass `Arc<wgpu::Device>` + `Arc<wgpu::Queue>` in
-`ReceiverConfig.gpu` at connect. The decode thread submits compute and waits
-(`poll(WaitForSubmissionIndex)`) before a frame is published, so the returned
-texture is ready to bind. Receive with `try_recv_video_gpu`; send with
-`Sender::send_video_texture`.
+`ReceiverConfig.gpu` at connect. The decode thread submits compute and returns;
+later submits on the same queue can sample the texture. CPU readback still
+waits in `vmx::gpu::read_texture_bgra`. Receive with `try_recv_video_gpu`; send
+with `Sender::send_video_texture`.
 
 ## MSRV
 
