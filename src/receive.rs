@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver as MpscReceiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -246,9 +246,22 @@ struct Shared {
     gpu_video: DecodedGpuQueue,
     wire_depth: AtomicU32,
     outbound_meta: Mutex<Vec<String>>,
+    /// Live preview request; reconnects re-read this instead of the connect-time config.
+    preview: AtomicBool,
+    /// Live suggested quality (`Quality` as `i32`); reconnects re-read this.
+    quality: AtomicI32,
     /// Cloned handles used to unblock I/O on [`ReceiverSession::disconnect`].
     video_io: Mutex<Option<TcpStream>>,
     audio_io: Mutex<Option<TcpStream>>,
+}
+
+fn quality_from_i32(v: i32) -> Quality {
+    match v {
+        1 => Quality::Low,
+        50 => Quality::Medium,
+        100 => Quality::High,
+        _ => Quality::Default,
+    }
 }
 
 impl Shared {
@@ -394,6 +407,8 @@ impl ReceiverSession {
             gpu_video: DecodedGpuQueue::new(VIDEO_DECODED_Q),
             wire_depth: AtomicU32::new(0),
             outbound_meta: Mutex::new(Vec::new()),
+            preview: AtomicBool::new(config.preview),
+            quality: AtomicI32::new(config.quality as i32),
             video_io: Mutex::new(None),
             audio_io: Mutex::new(None),
         });
@@ -579,6 +594,32 @@ impl ReceiverSession {
         self.send_metadata(tally_xml(tally))
     }
 
+    /// Current preview request, including runtime updates from [`Self::set_preview`].
+    pub fn preview(&self) -> bool {
+        self.shared.preview.load(Ordering::Acquire)
+    }
+
+    /// Current suggested quality, including runtime updates from [`Self::set_suggested_quality`].
+    pub fn suggested_quality(&self) -> Quality {
+        quality_from_i32(self.shared.quality.load(Ordering::Acquire))
+    }
+
+    /// Request preview (or full) video from the sender without reconnecting.
+    ///
+    /// Reconnects reuse this value instead of the original [`ReceiverConfig::preview`].
+    pub fn set_preview(&self, preview: bool) -> Result<(), OmtError> {
+        self.shared.preview.store(preview, Ordering::Release);
+        self.send_metadata(if preview { PREVIEW_ON } else { PREVIEW_OFF })
+    }
+
+    /// Ask the sender to encode at `quality` without reconnecting.
+    ///
+    /// Reconnects reuse this value instead of the original [`ReceiverConfig::quality`].
+    pub fn set_suggested_quality(&self, quality: Quality) -> Result<(), OmtError> {
+        self.shared.quality.store(quality as i32, Ordering::Release);
+        self.send_metadata(suggested_quality_xml(quality))
+    }
+
     /// Snapshot of session statistics (includes live queue depths).
     pub fn statistics(&self) -> SessionStatistics {
         let mut s = self.shared.stats.lock().map(|g| *g).unwrap_or_default();
@@ -679,7 +720,7 @@ fn socket_supervisor(
 
         let is_reconnect = !use_primed;
         use_primed = false;
-        if is_reconnect && let Err(e) = subscribe_socket(&stream, &config, &role) {
+        if is_reconnect && let Err(e) = subscribe_socket(&stream, &config, &shared, &role) {
             shared.set_error(format!("subscribe failed: {e}"));
             if !config.auto_reconnect {
                 break;
@@ -829,17 +870,20 @@ fn connect_first(
 fn subscribe_socket(
     stream: &TcpStream,
     config: &ReceiverConfig,
+    shared: &Shared,
     role: &SocketRole,
 ) -> Result<(), OmtError> {
     let mut stream = stream.try_clone()?;
+    let quality = quality_from_i32(shared.quality.load(Ordering::Acquire));
+    let preview = shared.preview.load(Ordering::Acquire);
     match role {
         SocketRole::Video { decode_audio, .. } => {
             send_subscriptions(
                 Some(&mut stream),
                 None,
                 config.frame_types,
-                config.quality,
-                config.preview,
+                quality,
+                preview,
                 *decode_audio,
             )?;
         }
@@ -848,7 +892,7 @@ fn subscribe_socket(
                 None,
                 Some(&mut stream),
                 config.frame_types,
-                config.quality,
+                quality,
                 false,
                 false,
             )?;
