@@ -1,6 +1,8 @@
 //! Session lifecycle: shutdown join, stats, and reconnect interrupt.
 
-use openmediatransport::{Codec, FrameType, MediaFrame, ReceiverConfig, ReceiverSession, Sender};
+use openmediatransport::{
+    Codec, FrameType, MediaFrame, Quality, ReceiverConfig, ReceiverSession, Sender,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 use vmx::{Codec as VmxCodec, Config as VmxConfig, Profile};
@@ -250,4 +252,83 @@ fn second_session_receives_video_after_disconnect() {
 
     running.store(false, Ordering::Relaxed);
     let _ = pump.join();
+}
+
+#[test]
+fn set_preview_switches_to_eighth_resolution() {
+    let mut sender = Sender::create("RuntimePreviewSrc", FrameType::VIDEO).unwrap();
+    let url = format!("omt://127.0.0.1:{}", sender.port());
+    let session = ReceiverSession::connect(
+        url,
+        ReceiverConfig {
+            frame_types: FrameType::VIDEO,
+            preview: false,
+            auto_reconnect: true,
+            connect_timeout: Duration::from_secs(2),
+            ..ReceiverConfig::default()
+        },
+    )
+    .unwrap();
+    wait_subscribed(&mut sender);
+    assert!(!session.preview());
+    assert!(!sender.preview());
+
+    session.set_preview(true).expect("set_preview");
+    assert!(session.preview());
+    session
+        .set_suggested_quality(Quality::Low)
+        .expect("set_suggested_quality");
+    assert_eq!(session.suggested_quality(), Quality::Low);
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let _ = sender.poll_accept();
+        let _ = sender.poll_peer_metadata();
+        if sender.preview() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        sender.preview(),
+        "sender should honor runtime preview metadata"
+    );
+
+    let payload = encode_pattern(128, 128);
+    let frame = MediaFrame {
+        frame_type: FrameType::VIDEO,
+        timestamp: 40_000_000,
+        codec: Codec::Vmx1 as i32,
+        width: 128,
+        height: 128,
+        frame_rate_n: 60,
+        frame_rate_d: 1,
+        aspect_ratio: 1.0,
+        data: payload,
+        ..Default::default()
+    };
+    sender.send_video(frame).expect("send");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut got = None;
+    while Instant::now() < deadline {
+        let _ = sender.poll_accept();
+        let _ = sender.poll_peer_metadata();
+        if let Some(f) = session.try_recv_video()
+            && f.timestamp == 40_000_000
+        {
+            got = Some(f);
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let frame = got.expect("decoded preview frame after set_preview");
+    assert_eq!(frame.width, 16);
+    assert_eq!(frame.height, 16);
+    assert_eq!(frame.pixels.len(), 16 * 16 * 4);
+
+    // Shared atomics are what reconnect's subscribe_socket reads.
+    assert!(session.preview());
+    assert_eq!(session.suggested_quality(), Quality::Low);
+    session.disconnect();
 }

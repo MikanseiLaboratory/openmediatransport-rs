@@ -248,6 +248,26 @@ impl AsyncReceiver {
         self.inner.set_tally(tally)
     }
 
+    /// Current preview request, including runtime updates.
+    pub fn preview(&self) -> bool {
+        self.inner.preview()
+    }
+
+    /// Current suggested quality, including runtime updates.
+    pub fn suggested_quality(&self) -> crate::types::Quality {
+        self.inner.suggested_quality()
+    }
+
+    /// Request preview (or full) video without reconnecting.
+    pub fn set_preview(&self, preview: bool) -> Result<(), OmtError> {
+        self.inner.set_preview(preview)
+    }
+
+    /// Ask the sender to encode at `quality` without reconnecting.
+    pub fn set_suggested_quality(&self, quality: crate::types::Quality) -> Result<(), OmtError> {
+        self.inner.set_suggested_quality(quality)
+    }
+
     /// Snapshot of receive statistics.
     pub fn statistics(&self) -> SessionStatistics {
         self.inner.statistics()
