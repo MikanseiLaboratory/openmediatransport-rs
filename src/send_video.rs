@@ -134,7 +134,10 @@ impl VideoEncoder {
     ) -> Result<(Vec<u8>, Duration), OmtError> {
         let profile = vmx_profile(quality);
         let cs = map_color_space(meta.color_space);
-        self.ensure_codec(meta.width as i32, meta.height as i32, profile, cs)?;
+        {
+            let _gpu_guard = ctx.lock_gpu();
+            self.ensure_codec(meta.width as i32, meta.height as i32, profile, cs)?;
+        }
         let vmx = self.codec.as_mut().expect("codec after ensure");
         let t0 = Instant::now();
         vmx.encode_from_texture(&ctx.device, &ctx.queue, texture)?;

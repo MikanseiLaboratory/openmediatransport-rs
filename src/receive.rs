@@ -1397,13 +1397,13 @@ fn decode_vmx_texture(
     }
     let vmx_cs = map_vmx_color_space(color_space);
 
-    let _gpu_guard = ctx.lock_gpu();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let reuse = cached.as_ref().is_some_and(|c| {
             let s = c.size();
             s.width == width && s.height == height
         });
         if !reuse {
+            let _gpu_guard = ctx.lock_gpu();
             *cached = Some(vmx::Codec::new(vmx::Config {
                 width,
                 height,
