@@ -4,7 +4,7 @@
 //! that queue and returns; later submits on the same queue can sample the
 //! texture. CPU readback still waits in [`vmx::gpu::read_texture_bgra`].
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::types::{ColorSpace, VideoFlags};
 
@@ -18,6 +18,17 @@ pub struct GpuVideoContext {
     pub device: Arc<wgpu::Device>,
     /// Caller's `wgpu` queue (same device as [`Self::device`]).
     pub queue: Arc<wgpu::Queue>,
+    /// Optional lock shared with the host renderer so encode/decode do not
+    /// race `Surface::configure` on the same device.
+    pub gpu_lock: Option<Arc<Mutex<()>>>,
+}
+
+impl GpuVideoContext {
+    pub(crate) fn lock_gpu(&self) -> Option<MutexGuard<'_, ()>> {
+        self.gpu_lock
+            .as_ref()
+            .map(|lock| lock.lock().unwrap_or_else(|e| e.into_inner()))
+    }
 }
 
 impl std::fmt::Debug for GpuVideoContext {

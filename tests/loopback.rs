@@ -282,6 +282,7 @@ mod gpu {
         let ctx = GpuVideoContext {
             device: Arc::new(device.clone()),
             queue: Arc::new(queue.clone()),
+            gpu_lock: None,
         };
         Some((ctx, device, queue))
     }
