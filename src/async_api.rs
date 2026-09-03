@@ -134,6 +134,11 @@ impl AsyncSender {
         self.inner.enable_audio_output();
     }
 
+    /// Cloneable audio ingress that can send while video encode runs.
+    pub fn audio_ingress(&self) -> crate::AudioIngress {
+        self.inner.audio_ingress()
+    }
+
     /// Set sender product info metadata.
     pub fn set_sender_info(&mut self, info: crate::types::SenderInfo) {
         self.inner.set_sender_info(info);
