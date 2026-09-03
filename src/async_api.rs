@@ -124,6 +124,11 @@ impl AsyncSender {
         self.inner.force_subscribe(video, audio, metadata);
     }
 
+    /// Enable audio on connections that have not subscribed to video.
+    pub fn enable_audio_on_idle_peers(&mut self) {
+        self.inner.enable_audio_on_idle_peers();
+    }
+
     /// Set sender product info metadata.
     pub fn set_sender_info(&mut self, info: crate::types::SenderInfo) {
         self.inner.set_sender_info(info);

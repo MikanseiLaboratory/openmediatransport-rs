@@ -672,6 +672,27 @@ impl Sender {
         }
     }
 
+    /// Enable audio on connections that have not subscribed to video.
+    ///
+    /// Studio Monitor opens a second TCP socket for audio before it sends
+    /// `SubscribeAudio`. `send_audio` is a no-op until some peer has
+    /// `audio=true`. Stamping audio onto the video peer writes FPA1 onto that
+    /// socket and holds the shared peer lock for [`NETWORK_SEND_TIMEOUT`].
+    pub fn enable_audio_on_idle_peers(&mut self) {
+        let mut any = false;
+        if let Ok(mut peers) = self.peers.lock() {
+            for peer in peers.values_mut() {
+                if !peer.state.video {
+                    peer.state.audio = true;
+                    any = true;
+                }
+            }
+        }
+        if any {
+            self.subscribed.audio = true;
+        }
+    }
+
     /// Force preview mode on all peers (tests / offline).
     pub fn force_preview(&mut self, preview: bool) {
         self.subscribed.preview = preview;
