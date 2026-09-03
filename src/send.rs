@@ -420,6 +420,9 @@ impl Sender {
             self.quality
         };
         self.subscribed = agg;
+        self.audio
+            .enabled
+            .store(self.subscribed.audio, Ordering::Release);
     }
 
     /// Whether any peer has subscribed to video.
@@ -1267,5 +1270,22 @@ mod tests {
         let peers = sender.peers.lock().unwrap();
         assert!(!peers[&1].state.audio, "video socket stays video-only");
         assert!(peers[&2].state.audio, "idle socket takes audio");
+    }
+
+    #[test]
+    fn peer_audio_subscribe_enables_ingress() {
+        let mut sender = Sender::create_offline("t", FrameType::VIDEO | FrameType::AUDIO).unwrap();
+        {
+            let mut peers = sender.peers.lock().unwrap();
+            let mut peer = connected_peer(true);
+            peer.state.audio = true;
+            peers.insert(1, peer);
+        }
+        sender.poll_peer_metadata().unwrap();
+        assert!(sender.audio_subscribed());
+        assert!(
+            sender.audio.enabled.load(Ordering::Acquire),
+            "AudioIngress must follow peer SubscribeAudio"
+        );
     }
 }
