@@ -180,20 +180,41 @@ impl VideoEncoder {
 
     fn save_bitstream(&mut self) -> Result<Vec<u8>, OmtError> {
         let codec = self.codec.as_mut().expect("codec after encode");
-        if self.buf.len() < (1 << 20) {
-            self.buf.resize(1 << 20, 0);
+        let min = save_buf_min(self.width, self.height);
+        if self.buf.len() < min {
+            self.buf.resize(min, 0);
         }
         loop {
             match codec.save_to(&mut self.buf) {
                 Ok(n) => return Ok(self.buf[..n].to_vec()),
                 Err(vmx::VmxError::OutputTooSmall { need, .. }) => {
-                    self.buf
-                        .resize(need.max(self.buf.len().saturating_mul(2)), 0);
+                    self.buf.resize(need.max(grow_save_buf(self.buf.len())?), 0);
+                }
+                Err(vmx::VmxError::BufferOverflow) => {
+                    // vmx::save_to reports BufferOverflow when dst is short, not
+                    // OutputTooSmall. High-entropy 1080p GPU (4-plane) frames
+                    // exceed the old 1 MiB floor.
+                    self.buf.resize(grow_save_buf(self.buf.len())?, 0);
                 }
                 Err(e) => return Err(e.into()),
             }
         }
     }
+}
+
+fn save_buf_min(width: i32, height: i32) -> usize {
+    let pixels = (width.max(0) as usize).saturating_mul(height.max(0) as usize);
+    pixels.saturating_mul(2).max(1 << 20)
+}
+
+fn grow_save_buf(len: usize) -> Result<usize, OmtError> {
+    const CAP: usize = 256 << 20;
+    let grown = len.saturating_mul(2).max(len.saturating_add(1 << 20));
+    let next = grown.min(CAP);
+    if next <= len {
+        return Err(vmx::VmxError::BufferOverflow.into());
+    }
+    Ok(next)
 }
 
 pub(crate) fn vmx_profile(quality: Quality) -> vmx::Profile {
@@ -309,5 +330,39 @@ mod tests {
         assert!(enc.encode_raw(&frame, Quality::High).is_ok());
         frame.flags = VideoFlags::NONE;
         assert!(enc.encode_raw(&frame, Quality::High).is_ok());
+    }
+
+    fn patterned_bgra(width: i32, height: i32) -> MediaFrame {
+        let stride = width * 4;
+        let mut data = vec![0u8; (stride * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let i = y * stride as usize + x * 4;
+                data[i] = (x % 256) as u8;
+                data[i + 1] = (y % 256) as u8;
+                data[i + 2] = ((x + y) % 256) as u8;
+                data[i + 3] = 255;
+            }
+        }
+        MediaFrame {
+            frame_type: FrameType::VIDEO,
+            codec: Codec::Bgra as i32,
+            width,
+            height,
+            stride,
+            flags: VideoFlags::ALPHA,
+            data,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn encode_1080p_bgra_succeeds() {
+        let mut enc = VideoEncoder::new();
+        let frame = patterned_bgra(1920, 1080);
+        let (bits, _elapsed) = enc
+            .encode_raw(&frame, Quality::High)
+            .expect("1080p BGRA encode");
+        assert!(!bits.is_empty());
     }
 }
