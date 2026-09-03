@@ -1,11 +1,13 @@
 //! OMT sender (sync).
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use crate::clock::{TimestampClock, resolve_timestamp};
 use crate::codec::fpa1;
@@ -48,6 +50,68 @@ struct Peer {
 /// Maximum buffered inbound control bytes per peer (subscribe frames are tiny).
 const PEER_INBOUND_CAP: usize = 64 * 1024;
 
+/// Shared audio ingress so `send_audio` can run while the owner encodes video.
+struct AudioShare {
+    clock: Mutex<TimestampClock>,
+    outbound: Option<SyncSender<WireBytes>>,
+    peers: Arc<Mutex<HashMap<usize, Peer>>>,
+    enabled: AtomicBool,
+}
+
+/// Cloneable audio sender. Safe to use on a worker while [`Sender`] encodes video.
+#[derive(Clone, Debug)]
+pub struct AudioIngress {
+    inner: Arc<AudioShare>,
+}
+
+impl AudioIngress {
+    /// Send one audio frame (no-op until [`Sender::enable_audio_output`]).
+    pub fn send(&self, frame: MediaFrame) -> Result<(), OmtError> {
+        if !self.inner.enabled.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut clock = self
+            .inner
+            .clock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let assembled = assemble_audio(&mut clock, frame)?;
+        drop(clock);
+        enqueue_wire(&self.inner.outbound, &self.inner.peers, &assembled)
+    }
+}
+
+impl std::fmt::Debug for AudioShare {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioShare")
+            .field("enabled", &self.inner_enabled())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AudioShare {
+    fn inner_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+}
+
+fn new_audio_share(
+    peers: &Arc<Mutex<HashMap<usize, Peer>>>,
+    outbound: &Option<SyncSender<WireBytes>>,
+) -> Arc<AudioShare> {
+    Arc::new(AudioShare {
+        clock: Mutex::new(TimestampClock::new(true)),
+        outbound: outbound.clone(),
+        peers: Arc::clone(peers),
+        enabled: AtomicBool::new(false),
+    })
+}
+/// Video write timeout. A dead receiver must not stall the shared peer lock
+/// (that lock is also taken by `poll_peer_metadata` on the encode thread).
+const PEER_VIDEO_WRITE_TIMEOUT: Duration = Duration::from_millis(40);
+/// Audio frames are small; fail fast so the video writer can take the lock.
+const PEER_AUDIO_WRITE_TIMEOUT: Duration = Duration::from_millis(8);
+
 /// Sender transport / buffering configuration.
 ///
 /// Defaults match libomtnet (`OMTConstants`):
@@ -87,7 +151,7 @@ pub struct Sender {
     stats: Statistics,
     info: SenderInfo,
     video_clock: TimestampClock,
-    audio_clock: TimestampClock,
+    audio: Arc<AudioShare>,
     listener: Option<TcpListener>,
     port: u16,
     peers: Arc<Mutex<HashMap<usize, Peer>>>,
@@ -121,6 +185,17 @@ impl Sender {
         crate::logging::init_logging();
         let (listener, port) = bind_port_range()?;
         let peers = Arc::new(Mutex::new(HashMap::new()));
+        let outbound_video = spawn_typed_writer(
+            config.send_queue_depth,
+            Arc::clone(&peers),
+            "omt-send-video",
+        );
+        let outbound_audio = spawn_typed_writer(
+            config.send_queue_depth,
+            Arc::clone(&peers),
+            "omt-send-audio",
+        );
+        let audio = new_audio_share(&peers, &outbound_audio);
         Ok(Self {
             name,
             frame_types,
@@ -128,23 +203,15 @@ impl Sender {
             stats: Statistics::default(),
             info: SenderInfo::default(),
             video_clock: TimestampClock::new(false),
-            audio_clock: TimestampClock::new(true),
+            audio,
             listener: Some(listener),
             port,
             peers: Arc::clone(&peers),
             next_peer_id: 1,
             subscribed: PeerState::default(),
             config,
-            outbound_video: spawn_typed_writer(
-                config.send_queue_depth,
-                Arc::clone(&peers),
-                "omt-send-video",
-            ),
-            outbound_audio: spawn_typed_writer(
-                config.send_queue_depth,
-                Arc::clone(&peers),
-                "omt-send-audio",
-            ),
+            outbound_video,
+            outbound_audio,
             video_encoder: crate::send_video::VideoEncoder::new(),
         })
     }
@@ -169,6 +236,17 @@ impl Sender {
         }
         crate::logging::init_logging();
         let peers = Arc::new(Mutex::new(HashMap::new()));
+        let outbound_video = spawn_typed_writer(
+            config.send_queue_depth,
+            Arc::clone(&peers),
+            "omt-send-video",
+        );
+        let outbound_audio = spawn_typed_writer(
+            config.send_queue_depth,
+            Arc::clone(&peers),
+            "omt-send-audio",
+        );
+        let audio = new_audio_share(&peers, &outbound_audio);
         Ok(Self {
             name,
             frame_types,
@@ -176,23 +254,15 @@ impl Sender {
             stats: Statistics::default(),
             info: SenderInfo::default(),
             video_clock: TimestampClock::new(false),
-            audio_clock: TimestampClock::new(true),
+            audio,
             listener: None,
             port: 0,
             peers: Arc::clone(&peers),
             next_peer_id: 1,
             subscribed: PeerState::default(),
             config,
-            outbound_video: spawn_typed_writer(
-                config.send_queue_depth,
-                Arc::clone(&peers),
-                "omt-send-video",
-            ),
-            outbound_audio: spawn_typed_writer(
-                config.send_queue_depth,
-                Arc::clone(&peers),
-                "omt-send-audio",
-            ),
+            outbound_video,
+            outbound_audio,
             video_encoder: crate::send_video::VideoEncoder::new(),
         })
     }
@@ -215,6 +285,13 @@ impl Sender {
     /// Configured frame types.
     pub fn frame_types(&self) -> FrameType {
         self.frame_types
+    }
+
+    /// Cloneable audio ingress that can send while this sender encodes video.
+    pub fn audio_ingress(&self) -> AudioIngress {
+        AudioIngress {
+            inner: Arc::clone(&self.audio),
+        }
     }
 
     /// Set encoding quality policy.
@@ -301,11 +378,15 @@ impl Sender {
         let mut peers = self.peers.lock().unwrap();
         let mut dead = Vec::new();
         for (id, peer) in peers.iter_mut() {
+            // `write_peers` briefly sets blocking; a failed write used to leave
+            // the socket blocking so this `read` stalled the encode thread.
+            let _ = peer.stream.set_nonblocking(true);
+            let _ = peer.stream.set_read_timeout(None);
             let mut buf = [0u8; 8192];
             match peer.stream.read(&mut buf) {
                 Ok(0) => dead.push(*id),
                 Ok(n) => ingest_peer_bytes(&mut peer.state, &mut peer.inbound, &buf[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
                 Err(_) => dead.push(*id),
             }
         }
@@ -339,6 +420,9 @@ impl Sender {
             self.quality
         };
         self.subscribed = agg;
+        self.audio
+            .enabled
+            .store(self.subscribed.audio, Ordering::Release);
     }
 
     /// Whether any peer has subscribed to video.
@@ -370,15 +454,15 @@ impl Sender {
     pub fn build_frame(&mut self, mut frame: MediaFrame) -> Result<AssembledFrame, OmtError> {
         let is_audio = frame.frame_type.contains(FrameType::AUDIO)
             && !frame.frame_type.contains(FrameType::VIDEO);
-        frame.timestamp = if is_audio {
-            self.audio_clock.resolve(
-                frame.timestamp,
-                frame.frame_rate_n,
-                frame.frame_rate_d,
-                frame.sample_rate,
-                frame.samples_per_channel,
-            )
-        } else if frame.frame_type.contains(FrameType::VIDEO) {
+        if is_audio {
+            let mut clock = self
+                .audio
+                .clock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            return assemble_audio(&mut clock, frame);
+        }
+        frame.timestamp = if frame.frame_type.contains(FrameType::VIDEO) {
             self.video_clock.resolve(
                 frame.timestamp,
                 frame.frame_rate_n,
@@ -423,59 +507,6 @@ impl Sender {
                 video: Some(video),
                 audio: None,
                 data: frame.data,
-                metadata,
-            })
-        } else if frame.frame_type.contains(FrameType::AUDIO) {
-            let (payload, active) = if frame.active_channels != 0 {
-                (frame.data, frame.active_channels)
-            } else {
-                let channels = frame.channels.max(0) as usize;
-                let samples = frame.samples_per_channel.max(0) as usize;
-                if channels == 0 || samples == 0 {
-                    return Err(OmtError::InvalidArgument(
-                        "audio frame missing geometry".into(),
-                    ));
-                }
-                let expected = channels * samples * 4;
-                if frame.data.len() < expected {
-                    return Err(OmtError::InvalidArgument(
-                        "audio frame data too short".into(),
-                    ));
-                }
-                let mut owned: Vec<Vec<f32>> = Vec::with_capacity(channels);
-                for ch in 0..channels {
-                    let mut plane = Vec::with_capacity(samples);
-                    let base = ch * samples * 4;
-                    for s in 0..samples {
-                        let o = base + s * 4;
-                        let b: [u8; 4] = frame.data[o..o + 4].try_into().unwrap();
-                        plane.push(f32::from_le_bytes(b));
-                    }
-                    owned.push(plane);
-                }
-                let refs: Vec<&[f32]> = owned.iter().map(|p| p.as_slice()).collect();
-                fpa1::encode_planar(&refs)?
-            };
-            let audio = AudioHeader {
-                codec: Codec::Fpa1,
-                sample_rate: frame.sample_rate,
-                samples_per_channel: frame.samples_per_channel,
-                channels: frame.channels,
-                active_channels: active,
-                reserved1: 0,
-            };
-            let data_length = (AUDIO_EXT_HEADER_SIZE + payload.len() + metadata.len()) as i32;
-            Ok(AssembledFrame {
-                header: FrameHeader {
-                    version: PROTOCOL_VERSION,
-                    frame_type: FrameType::AUDIO,
-                    timestamp: frame.timestamp,
-                    metadata_length,
-                    data_length,
-                },
-                video: None,
-                audio: Some(audio),
-                data: payload,
                 metadata,
             })
         } else {
@@ -579,12 +610,11 @@ impl Sender {
     }
 
     /// Send an audio frame to subscribed peers (no-op if none subscribed).
+    ///
+    /// Uses [`Self::audio_ingress`]; callers that encode video on another
+    /// thread should send audio through that handle instead of this `&mut self`.
     pub fn send_audio(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
-        if !self.subscribed.audio {
-            return Ok(());
-        }
-        let assembled = self.build_frame(frame)?;
-        self.broadcast(&assembled)
+        self.audio_ingress().send(frame)
     }
 
     /// Send metadata XML.
@@ -663,12 +693,48 @@ impl Sender {
         self.subscribed.video = video;
         self.subscribed.audio = audio;
         self.subscribed.metadata = metadata;
+        self.audio.enabled.store(audio, Ordering::Release);
         if let Ok(mut peers) = self.peers.lock() {
             for peer in peers.values_mut() {
                 peer.state.video = video;
                 peer.state.audio = audio;
                 peer.state.metadata = metadata;
             }
+        }
+    }
+
+    /// Enable audio on connections that have not subscribed to video.
+    ///
+    /// Studio Monitor often opens a second TCP socket for audio before it
+    /// sends `SubscribeAudio`. Prefer that idle socket so FPA1 stays off the
+    /// video writer.
+    pub fn enable_audio_on_idle_peers(&mut self) {
+        self.enable_audio_output();
+    }
+
+    /// Make [`Self::send_audio`] deliver to Studio Monitor.
+    ///
+    /// `send_audio` is a no-op until `subscribed.audio`. Idle (non-video)
+    /// sockets are marked first. If the only peer is the video socket, audio
+    /// is enabled there too so a single-connection monitor can demux. Writers
+    /// must not hold the peer lock across a long blocking `write_all`.
+    pub fn enable_audio_output(&mut self) {
+        let mut marked = false;
+        if let Ok(mut peers) = self.peers.lock() {
+            if peers.is_empty() {
+                return;
+            }
+            let has_idle = peers.values().any(|peer| !peer.state.video);
+            for peer in peers.values_mut() {
+                if !peer.state.video || !has_idle {
+                    peer.state.audio = true;
+                    marked = true;
+                }
+            }
+        }
+        if marked {
+            self.subscribed.audio = true;
+            self.audio.enabled.store(true, Ordering::Release);
         }
     }
 
@@ -719,6 +785,7 @@ impl Sender {
         self.listener = None;
         self.outbound_video = None;
         self.outbound_audio = None;
+        self.audio.enabled.store(false, Ordering::Release);
         if let Ok(mut peers) = self.peers.lock() {
             for peer in peers.values() {
                 let _ = peer.stream.shutdown(Shutdown::Both);
@@ -780,7 +847,104 @@ fn spawn_typed_writer(
     Some(tx)
 }
 
+fn assemble_audio(
+    clock: &mut TimestampClock,
+    mut frame: MediaFrame,
+) -> Result<AssembledFrame, OmtError> {
+    frame.timestamp = clock.resolve(
+        frame.timestamp,
+        frame.frame_rate_n,
+        frame.frame_rate_d,
+        frame.sample_rate,
+        frame.samples_per_channel,
+    );
+    let metadata = frame
+        .frame_metadata
+        .as_deref()
+        .map(encode_metadata_xml)
+        .unwrap_or_default();
+    let metadata_length = metadata.len() as u16;
+    let (payload, active) = if frame.active_channels != 0 {
+        (frame.data, frame.active_channels)
+    } else {
+        let channels = frame.channels.max(0) as usize;
+        let samples = frame.samples_per_channel.max(0) as usize;
+        if channels == 0 || samples == 0 {
+            return Err(OmtError::InvalidArgument(
+                "audio frame missing geometry".into(),
+            ));
+        }
+        let expected = channels * samples * 4;
+        if frame.data.len() < expected {
+            return Err(OmtError::InvalidArgument(
+                "audio frame data too short".into(),
+            ));
+        }
+        let mut owned: Vec<Vec<f32>> = Vec::with_capacity(channels);
+        for ch in 0..channels {
+            let mut plane = Vec::with_capacity(samples);
+            let base = ch * samples * 4;
+            for s in 0..samples {
+                let o = base + s * 4;
+                let b: [u8; 4] = frame.data[o..o + 4].try_into().unwrap();
+                plane.push(f32::from_le_bytes(b));
+            }
+            owned.push(plane);
+        }
+        let refs: Vec<&[f32]> = owned.iter().map(|p| p.as_slice()).collect();
+        fpa1::encode_planar(&refs)?
+    };
+    let audio = AudioHeader {
+        codec: Codec::Fpa1,
+        sample_rate: frame.sample_rate,
+        samples_per_channel: frame.samples_per_channel,
+        channels: frame.channels,
+        active_channels: active,
+        reserved1: 0,
+    };
+    let data_length = (AUDIO_EXT_HEADER_SIZE + payload.len() + metadata.len()) as i32;
+    Ok(AssembledFrame {
+        header: FrameHeader {
+            version: PROTOCOL_VERSION,
+            frame_type: FrameType::AUDIO,
+            timestamp: frame.timestamp,
+            metadata_length,
+            data_length,
+        },
+        video: None,
+        audio: Some(audio),
+        data: payload,
+        metadata,
+    })
+}
+
+fn enqueue_wire(
+    outbound: &Option<SyncSender<WireBytes>>,
+    peers: &Mutex<HashMap<usize, Peer>>,
+    frame: &AssembledFrame,
+) -> Result<(), OmtError> {
+    let wire = WireBytes {
+        ft: frame.header.frame_type,
+        full: frame.to_bytes(),
+        preview: None,
+    };
+    if let Some(tx) = outbound {
+        match tx.try_send(wire) {
+            Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+        }
+        return Ok(());
+    }
+    write_peers(peers, &wire);
+    Ok(())
+}
+
 fn write_peers(peers: &Mutex<HashMap<usize, Peer>>, wire: &WireBytes) {
+    let timeout = if wire.ft.contains(FrameType::AUDIO) && !wire.ft.contains(FrameType::VIDEO) {
+        PEER_AUDIO_WRITE_TIMEOUT
+    } else {
+        PEER_VIDEO_WRITE_TIMEOUT
+    };
     let mut peers = peers.lock().unwrap();
     let mut dead = Vec::new();
     for (id, peer) in peers.iter_mut() {
@@ -792,14 +956,17 @@ fn write_peers(peers: &Mutex<HashMap<usize, Peer>>, wire: &WireBytes) {
         } else {
             &wire.full
         };
-        // Blocking write with a short timeout: a dead receiver must not stall
-        // accept/subscribe for the next Studio Monitor session.
-        let _ = peer.stream.set_write_timeout(Some(NETWORK_SEND_TIMEOUT));
+        let _ = peer.stream.set_write_timeout(Some(timeout));
         let _ = peer.stream.set_nonblocking(false);
-        if peer.stream.write_all(bytes).is_err() {
-            dead.push(*id);
-        } else {
-            let _ = peer.stream.set_nonblocking(true);
+        let result = peer.stream.write_all(bytes);
+        let _ = peer.stream.set_nonblocking(true);
+        match result {
+            Ok(()) => {}
+            Err(e)
+                if e.kind() == ErrorKind::TimedOut
+                    || e.kind() == ErrorKind::WouldBlock
+                    || e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => dead.push(*id),
         }
     }
     for id in dead {
@@ -1063,5 +1230,62 @@ mod tests {
         sender.close();
         assert_eq!(sender.connection_count(), 0);
         assert!(!sender.video_subscribed());
+    }
+
+    fn connected_peer(video: bool) -> Peer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        std::mem::forget(client);
+        Peer {
+            stream: server,
+            state: PeerState {
+                video,
+                ..PeerState::default()
+            },
+            inbound: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn enable_audio_output_marks_lone_video_peer() {
+        let mut sender = Sender::create_offline("t", FrameType::VIDEO | FrameType::AUDIO).unwrap();
+        sender.peers.lock().unwrap().insert(1, connected_peer(true));
+        sender.enable_audio_output();
+        assert!(sender.audio_subscribed());
+        assert_eq!(sender.audio_subscriber_count(), 1);
+    }
+
+    #[test]
+    fn enable_audio_output_prefers_idle_peer() {
+        let mut sender = Sender::create_offline("t", FrameType::VIDEO | FrameType::AUDIO).unwrap();
+        {
+            let mut peers = sender.peers.lock().unwrap();
+            peers.insert(1, connected_peer(true));
+            peers.insert(2, connected_peer(false));
+        }
+        sender.enable_audio_output();
+        assert!(sender.audio_subscribed());
+        let peers = sender.peers.lock().unwrap();
+        assert!(!peers[&1].state.audio, "video socket stays video-only");
+        assert!(peers[&2].state.audio, "idle socket takes audio");
+    }
+
+    #[test]
+    fn peer_audio_subscribe_enables_ingress() {
+        let mut sender = Sender::create_offline("t", FrameType::VIDEO | FrameType::AUDIO).unwrap();
+        {
+            let mut peers = sender.peers.lock().unwrap();
+            let mut peer = connected_peer(true);
+            peer.state.audio = true;
+            peers.insert(1, peer);
+        }
+        sender.poll_peer_metadata().unwrap();
+        assert!(sender.audio_subscribed());
+        assert!(
+            sender.audio.enabled.load(Ordering::Acquire),
+            "AudioIngress must follow peer SubscribeAudio"
+        );
     }
 }
