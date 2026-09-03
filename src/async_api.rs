@@ -129,6 +129,11 @@ impl AsyncSender {
         self.inner.enable_audio_on_idle_peers();
     }
 
+    /// Enable audio for Studio Monitor (idle socket, or the video socket if alone).
+    pub fn enable_audio_output(&mut self) {
+        self.inner.enable_audio_output();
+    }
+
     /// Set sender product info metadata.
     pub fn set_sender_info(&mut self, info: crate::types::SenderInfo) {
         self.inner.set_sender_info(info);
