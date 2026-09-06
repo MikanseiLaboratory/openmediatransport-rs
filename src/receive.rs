@@ -589,7 +589,7 @@ impl ReceiverSession {
         Ok(())
     }
 
-    /// Send tally to the sender (`<OMTTally … />`, including the `Program==` wire form).
+    /// Send tally to the sender (`<OMTTally … />`).
     pub fn set_tally(&self, tally: Tally) -> Result<(), OmtError> {
         self.send_metadata(tally_xml(tally))
     }
