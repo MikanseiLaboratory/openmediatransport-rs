@@ -24,7 +24,7 @@ tracing = "0.1"
 socket2 = "0.6"
 mdns-sd = "0.20"
 roxmltree = "0.21"
-vmx = { git = "https://github.com/MikanseiLaboratory/vmx-rs", rev = "2780ad7d3441e9cc53cbbaef90f1c87c3c76fcc2" }
+vmx = { git = "https://github.com/MikanseiLaboratory/vmx-rs", rev = "b9a0fd19226e3e2ebf4041a2b119b855e71d9ca3" }
 wgpu = { version = "30.0.0", optional = true, default-features = true }
 tokio = { version = "1", optional = true, features = ["net", "rt", "rt-multi-thread", "sync", "time", "macros", "io-util"] }
 
