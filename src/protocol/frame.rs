@@ -190,7 +190,16 @@ pub struct AssembledFrame {
 impl AssembledFrame {
     /// Serialize the full frame (header + body).
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER_SIZE + self.header.data_length.max(0) as usize);
+        let mut out = Vec::new();
+        self.write_into(&mut out);
+        out
+    }
+
+    /// Serialize into `out`, reusing its allocation.
+    pub fn write_into(&self, out: &mut Vec<u8>) {
+        let need = HEADER_SIZE + self.header.data_length.max(0) as usize;
+        out.clear();
+        out.reserve(need);
         out.extend_from_slice(&self.header.to_bytes());
         if let Some(v) = self.video {
             out.extend_from_slice(&v.to_bytes());
@@ -200,7 +209,6 @@ impl AssembledFrame {
         }
         out.extend_from_slice(&self.data);
         out.extend_from_slice(&self.metadata);
-        out
     }
 
     /// Parse a complete frame from bytes (header + body already available).

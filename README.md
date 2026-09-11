@@ -35,6 +35,12 @@ later submits on the same queue can sample the texture. CPU readback still
 waits in `vmx::gpu::read_texture_bgra`. Receive with `try_recv_video_gpu`; send
 with `Sender::send_video_texture`.
 
+`Sender::send_video` uses the slice-fused CPU encoder (same structure as libvmx).
+GPU encode is `Sender::send_video_texture`. Opaque frames skip the alpha plane
+(matching libvmx `EncodeBGRX`). `set_gpu_encode_pipeline(true)` overlaps GPU
+FDCT of frame N with entropy coding / send of frame N-1 (one frame of latency;
+call `flush_gpu_encode` after the last texture).
+
 ## MSRV
 
 **Rust 1.97** (`edition = "2024"`).

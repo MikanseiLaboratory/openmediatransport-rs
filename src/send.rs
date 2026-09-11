@@ -163,6 +163,10 @@ pub struct Sender {
     /// Background queue for audio socket writes (separate so video cannot stall audio).
     outbound_audio: Option<SyncSender<WireBytes>>,
     video_encoder: crate::send_video::VideoEncoder,
+    #[cfg(feature = "wgpu")]
+    gpu_pipeline: bool,
+    #[cfg(feature = "wgpu")]
+    pending_gpu: Option<crate::gpu::VideoTextureMeta>,
 }
 
 impl Sender {
@@ -213,6 +217,10 @@ impl Sender {
             outbound_video,
             outbound_audio,
             video_encoder: crate::send_video::VideoEncoder::new(),
+            #[cfg(feature = "wgpu")]
+            gpu_pipeline: false,
+            #[cfg(feature = "wgpu")]
+            pending_gpu: None,
         })
     }
 
@@ -264,6 +272,10 @@ impl Sender {
             outbound_video,
             outbound_audio,
             video_encoder: crate::send_video::VideoEncoder::new(),
+            #[cfg(feature = "wgpu")]
+            gpu_pipeline: false,
+            #[cfg(feature = "wgpu")]
+            pending_gpu: None,
         })
     }
 
@@ -297,6 +309,27 @@ impl Sender {
     /// Set encoding quality policy.
     pub fn set_quality(&mut self, quality: Quality) {
         self.quality = quality;
+    }
+
+    /// Overlap GPU FDCT of frame N with entropy coding / send of frame N-1.
+    ///
+    /// Adds one frame of latency. Call [`Self::flush_gpu_encode`] after the last
+    /// texture so the in-flight frame is sent. Default is off (synchronous encode).
+    #[cfg(feature = "wgpu")]
+    pub fn set_gpu_encode_pipeline(&mut self, enabled: bool) {
+        self.gpu_pipeline = enabled;
+    }
+
+    /// Whether GPU texture encode is pipelined.
+    #[cfg(feature = "wgpu")]
+    pub fn gpu_encode_pipeline(&self) -> bool {
+        self.gpu_pipeline
+    }
+
+    /// Finish and send a texture submitted by pipelined [`Self::send_video_texture`].
+    #[cfg(feature = "wgpu")]
+    pub fn flush_gpu_encode(&mut self, ctx: &crate::gpu::GpuVideoContext) -> Result<(), OmtError> {
+        self.finish_pending_gpu(ctx)
     }
 
     /// Set sender product info.
@@ -548,14 +581,18 @@ impl Sender {
             frame.codec = Codec::Vmx1 as i32;
         }
         let assembled = self.build_frame(frame)?;
-        self.broadcast(&assembled)
+        let result = self.broadcast(&assembled);
+        self.video_encoder.recycle_bitstream(assembled.data);
+        result
     }
 
     /// Encode a `Bgra8Unorm` (or `Rgba8Unorm`) texture on `ctx` and send VMX1.
     ///
     /// Texture size must match [`crate::VideoTextureMeta`] width/height.
-    /// Quality follows [`Self::effective_quality`]. Encode runs on the calling
-    /// thread and waits for GPU readback (same as CPU `encode_raw`).
+    /// Quality follows [`Self::effective_quality`]. By default encode waits for
+    /// GPU readback (same as CPU `encode_raw`). Enable
+    /// [`Self::set_gpu_encode_pipeline`] to overlap the next submit with
+    /// finishing the previous frame.
     #[cfg(feature = "wgpu")]
     pub fn send_video_texture(
         &mut self,
@@ -580,10 +617,36 @@ impl Sender {
             )));
         }
         let quality = self.effective_quality();
+        if self.gpu_pipeline {
+            self.finish_pending_gpu(ctx)?;
+            self.video_encoder
+                .submit_from_texture(ctx, texture, &meta, quality)?;
+            self.pending_gpu = Some(meta);
+            return Ok(());
+        }
         let (bitstream, elapsed) = self
             .video_encoder
             .encode_from_texture(ctx, texture, &meta, quality)?;
         self.stats.record_codec(elapsed);
+        self.send_encoded_texture(meta, bitstream)
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn finish_pending_gpu(&mut self, ctx: &crate::gpu::GpuVideoContext) -> Result<(), OmtError> {
+        let Some(meta) = self.pending_gpu.take() else {
+            return Ok(());
+        };
+        let (bitstream, elapsed) = self.video_encoder.finish_submitted_texture(ctx)?;
+        self.stats.record_codec(elapsed);
+        self.send_encoded_texture(meta, bitstream)
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn send_encoded_texture(
+        &mut self,
+        meta: crate::gpu::VideoTextureMeta,
+        bitstream: Vec<u8>,
+    ) -> Result<(), OmtError> {
         let aspect = if meta.height == 0 {
             1.0
         } else {
@@ -606,7 +669,9 @@ impl Sender {
             ..Default::default()
         };
         let assembled = self.build_frame(frame)?;
-        self.broadcast(&assembled)
+        let result = self.broadcast(&assembled);
+        self.video_encoder.recycle_bitstream(assembled.data);
+        result
     }
 
     /// Send an audio frame to subscribed peers (no-op if none subscribed).
@@ -645,7 +710,11 @@ impl Sender {
 
     fn broadcast(&mut self, frame: &AssembledFrame) -> Result<(), OmtError> {
         let ft = frame.header.frame_type;
-        let full = frame.to_bytes();
+        let full = {
+            let mut full = Vec::new();
+            frame.write_into(&mut full);
+            full
+        };
         let preview = if ft.contains(FrameType::VIDEO) {
             preview_video_bytes(frame)
         } else {
@@ -976,7 +1045,7 @@ fn write_peers(peers: &Mutex<HashMap<usize, Peer>>, wire: &WireBytes) {
 
 /// Build a preview-mode serialization of a VMX1 video frame (DC prefix + flag).
 fn preview_video_bytes(frame: &AssembledFrame) -> Option<Vec<u8>> {
-    let video = frame.video?;
+    let mut video = frame.video?;
     if video.codec != Codec::Vmx1 {
         return None;
     }
@@ -984,14 +1053,17 @@ fn preview_video_bytes(frame: &AssembledFrame) -> Option<Vec<u8>> {
     if preview_len == 0 || preview_len > frame.data.len() {
         return None;
     }
-    let mut preview = frame.clone();
-    if let Some(v) = preview.video.as_mut() {
-        v.flags = VideoFlags(v.flags.0 | VideoFlags::PREVIEW.0);
-    }
-    preview.data.truncate(preview_len);
-    preview.header.data_length =
-        (VIDEO_EXT_HEADER_SIZE + preview.data.len() + preview.metadata.len()) as i32;
-    Some(preview.to_bytes())
+    video.flags = VideoFlags(video.flags.0 | VideoFlags::PREVIEW.0);
+    let mut header = frame.header;
+    header.data_length = (VIDEO_EXT_HEADER_SIZE + preview_len + frame.metadata.len()) as i32;
+    let mut out = Vec::with_capacity(
+        crate::protocol::frame::HEADER_SIZE + header.data_length.max(0) as usize,
+    );
+    out.extend_from_slice(&header.to_bytes());
+    out.extend_from_slice(&video.to_bytes());
+    out.extend_from_slice(&frame.data[..preview_len]);
+    out.extend_from_slice(&frame.metadata);
+    Some(out)
 }
 
 fn ingest_peer_bytes(state: &mut PeerState, inbound: &mut Vec<u8>, data: &[u8]) {

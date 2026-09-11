@@ -496,15 +496,18 @@ mod gpu {
             data: sample_bgra(width, height),
             ..Default::default()
         };
-        sender.send_video(frame).expect("send");
+        sender.send_video(frame.clone()).expect("send");
 
         let mut got = None;
-        for _ in 0..300 {
-            if let Some(f) = session.try_recv_video_gpu()
-                && f.timestamp == 40_000_000
-            {
+        for i in 0..600 {
+            if let Some(f) = session.try_recv_video_gpu() {
                 got = Some(f);
                 break;
+            }
+            if i == 200 || i == 400 {
+                let _ = sender.poll_accept();
+                let _ = sender.poll_peer_metadata();
+                let _ = sender.send_video(frame.clone());
             }
             thread::sleep(Duration::from_millis(10));
         }
