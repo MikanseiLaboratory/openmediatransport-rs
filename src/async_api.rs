@@ -104,6 +104,18 @@ impl AsyncSender {
         self.inner.set_quality(quality)
     }
 
+    /// Overlap GPU FDCT of frame N with entropy coding of frame N-1.
+    #[cfg(feature = "wgpu")]
+    pub fn set_gpu_encode_pipeline(&mut self, enabled: bool) {
+        self.inner.set_gpu_encode_pipeline(enabled);
+    }
+
+    /// Finish a pipelined GPU texture encode.
+    #[cfg(feature = "wgpu")]
+    pub async fn flush_gpu_encode(&mut self, ctx: &crate::GpuVideoContext) -> Result<(), OmtError> {
+        tokio::task::block_in_place(|| self.inner.flush_gpu_encode(ctx))
+    }
+
     /// Effective quality (local policy or peer suggestions).
     pub fn effective_quality(&self) -> crate::types::Quality {
         self.inner.effective_quality()

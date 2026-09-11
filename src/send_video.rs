@@ -13,6 +13,7 @@ pub(crate) struct VideoEncoder {
     profile: vmx::Profile,
     color_space: vmx::ColorSpace,
     buf: Vec<u8>,
+    spare: Vec<u8>,
 }
 
 impl std::fmt::Debug for VideoEncoder {
@@ -36,6 +37,7 @@ impl VideoEncoder {
             profile: vmx::Profile::Default,
             color_space: vmx::ColorSpace::Undefined,
             buf: Vec::new(),
+            spare: Vec::new(),
         }
     }
 
@@ -138,9 +140,51 @@ impl VideoEncoder {
             let _gpu_guard = ctx.lock_gpu();
             self.ensure_codec(meta.width as i32, meta.height as i32, profile, cs)?;
         }
+        let include_alpha = meta.flags.contains(VideoFlags::ALPHA);
         let vmx = self.codec.as_mut().expect("codec after ensure");
         let t0 = Instant::now();
-        vmx.encode_from_texture(&ctx.device, &ctx.queue, texture)?;
+        if include_alpha {
+            vmx.encode_from_texture(&ctx.device, &ctx.queue, texture)?;
+        } else {
+            vmx.encode_from_texture_opaque(&ctx.device, &ctx.queue, texture)?;
+        }
+        let bitstream = self.save_bitstream()?;
+        Ok((bitstream, t0.elapsed()))
+    }
+
+    /// Submit GPU encode without waiting for readback / entropy coding.
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn submit_from_texture(
+        &mut self,
+        ctx: &crate::GpuVideoContext,
+        texture: &wgpu::Texture,
+        meta: &crate::VideoTextureMeta,
+        quality: Quality,
+    ) -> Result<(), OmtError> {
+        let profile = vmx_profile(quality);
+        let cs = map_color_space(meta.color_space);
+        {
+            let _gpu_guard = ctx.lock_gpu();
+            self.ensure_codec(meta.width as i32, meta.height as i32, profile, cs)?;
+        }
+        let include_alpha = meta.flags.contains(VideoFlags::ALPHA);
+        let vmx = self.codec.as_mut().expect("codec after ensure");
+        vmx.encode_from_texture_submit(&ctx.device, &ctx.queue, texture, include_alpha)?;
+        Ok(())
+    }
+
+    /// Finish a previous [`Self::submit_from_texture`].
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn finish_submitted_texture(
+        &mut self,
+        ctx: &crate::GpuVideoContext,
+    ) -> Result<(Vec<u8>, Duration), OmtError> {
+        let vmx = self
+            .codec
+            .as_mut()
+            .ok_or_else(|| OmtError::InvalidArgument("GPU encode is not in progress".into()))?;
+        let t0 = Instant::now();
+        vmx.encode_submitted_finish(&ctx.device)?;
         let bitstream = self.save_bitstream()?;
         Ok((bitstream, t0.elapsed()))
     }
@@ -178,6 +222,13 @@ impl VideoEncoder {
         Ok(())
     }
 
+    pub(crate) fn recycle_bitstream(&mut self, mut used: Vec<u8>) {
+        used.clear();
+        if used.capacity() > self.spare.capacity() {
+            self.spare = used;
+        }
+    }
+
     fn save_bitstream(&mut self) -> Result<Vec<u8>, OmtError> {
         let codec = self.codec.as_mut().expect("codec after encode");
         let min = save_buf_min(self.width, self.height);
@@ -186,7 +237,12 @@ impl VideoEncoder {
         }
         loop {
             match codec.save_to(&mut self.buf) {
-                Ok(n) => return Ok(self.buf[..n].to_vec()),
+                Ok(n) => {
+                    let mut out = std::mem::take(&mut self.buf);
+                    out.truncate(n);
+                    self.buf = std::mem::take(&mut self.spare);
+                    return Ok(out);
+                }
                 Err(vmx::VmxError::OutputTooSmall { need, .. }) => {
                     self.buf.resize(need.max(grow_save_buf(self.buf.len())?), 0);
                 }
