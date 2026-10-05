@@ -14,7 +14,7 @@ Pure Rust implementation of **Open Media Transport (OMT)** — video, audio, and
 | [libomtnet](https://github.com/openmediatransport/libomtnet) | Official .NET OMT core |
 | [libomt](https://github.com/openmediatransport/libomt) | Official C wrapper for libomtnet |
 | [libvmx](https://github.com/openmediatransport/libvmx) | Official VMX1 video codec |
-| [vmx-rs](https://github.com/MikanseiLaboratory/vmx-rs) | Pure Rust VMX1 codec
+| [vmx-rs](https://github.com/MikanseiLaboratory/vmx-rs) | Pure Rust VMX1 codec ([`vmx1`](https://crates.io/crates/vmx1) on crates.io)
 
 ## Features
 
@@ -44,6 +44,12 @@ call `flush_gpu_encode` after the last texture).
 ## MSRV
 
 **Rust 1.97** (`edition = "2024"`).
+
+## Install
+
+```toml
+openmediatransport = "0.1"
+```
 
 ## Quick start
 
