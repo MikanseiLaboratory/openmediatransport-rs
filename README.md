@@ -1,6 +1,9 @@
 # openmediatransport-rs
 
-<img width="1280" height="640" alt="image" src="https://github.com/user-attachments/assets/dc7fda92-c88d-46e8-acc9-5afd00caf1b6" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/branding/openmediatransport-rs-logo-on-dark.svg" />
+  <img alt="openmediatransport-rs" width="640" src="assets/branding/openmediatransport-rs-logo-on-light.svg" />
+</picture>
 
 
 [![CI](https://github.com/MikanseiLaboratory/openmediatransport-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/openmediatransport-rs/actions/workflows/ci.yml)
