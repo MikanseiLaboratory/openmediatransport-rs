@@ -92,12 +92,11 @@ must parse. From [`OMTMetadataConstants`](https://github.com/openmediatransport/
 > Receivers will check for these exact string matches and won't bother to parse the XML.
 > This means any changes to these, even slightly will result in the commands being ignored entirely.
 
-This crate **sends** those exact constants. **Receiving** matches the four tally
-constants by exact string first (they use invalid `Program==` and cannot be
-XML-parsed), then parses everything else with an XML parser by element/attribute
-keys. Well-formed `<OMTTally Program="true" />` is therefore still accepted here,
-but official libomtnet receivers will ignore it. Multiple documents may be
-wrapped in `<OMTGroup>` ([recommended application formats](https://github.com/openmediatransport/Metadata)).
+This crate **sends** the well-formed tally constants (`Program=`). **Receiving**
+matches both those constants and the legacy `Program==` tokens by exact string
+first (legacy documents cannot be XML-parsed), then parses everything else with
+an XML parser by element/attribute keys. Multiple documents may be wrapped in
+`<OMTGroup>` ([recommended application formats](https://github.com/openmediatransport/Metadata)).
 
 ### Subscribe Commands
 
@@ -122,15 +121,16 @@ Enable/disable sending preview video data instead of the full resolution frame.
 
 ### Tally Commands
 
-On the wire these are the libomtnet constants (`Program==` is a double equals,
-not well-formed XML):
+Sent (and matched) as well-formed XML:
 
-\<OMTTally Preview="true" Program=="false" /\>
-\<OMTTally Preview="false" Program=="true" /\>
-\<OMTTally Preview="true" Program=="true" /\>
-\<OMTTally Preview="false" Program=="false" /\>
+\<OMTTally Preview="true" Program="false" /\>
+\<OMTTally Preview="false" Program="true" /\>
+\<OMTTally Preview="true" Program="true" /\>
+\<OMTTally Preview="false" Program="false" /\>
 
-See [`TALLY_PREVIEW` … `TALLY_NONE`](https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L43-L46).
+Receivers also accept the legacy `Program==` tokens used by older encoders.
+
+See [`TALLY_PREVIEW` … `TALLY_NONE`](https://github.com/openmediatransport/libomtnet/blob/598214ab5d10112c44bd72df534af510c4e4f4c8/src/OMTMetadata.cs#L43-L56).
 
 Sent by a receiver to indicate tally status.
 
