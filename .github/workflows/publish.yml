@@ -5,7 +5,7 @@
 #   repository: openmediatransport-rs
 #   workflow filename: publish.yml
 #   environment: (leave empty)
-# `vmx1` must already be on crates.io.
+# `vmx` must already be on crates.io.
 
 name: Publish
 
