@@ -1162,7 +1162,7 @@ mod tests {
     use crate::types::ColorSpace;
 
     #[test]
-    fn preview_variant_is_shorter_vmx1_and_none_for_uyvy() {
+    fn preview_variant_is_shorter_vmx_and_none_for_uyvy() {
         let mut enc = vmx::Codec::new(vmx::Config::new(64, 64)).unwrap();
         let stride = 64 * 2;
         let uyvy = vec![128u8; stride * 64];
@@ -1206,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn send_video_encodes_uyvy_and_passthrough_vmx1() {
+    fn send_video_encodes_uyvy_and_passthrough_vmx() {
         let mut sender = Sender::create_offline("t", FrameType::VIDEO).unwrap();
         sender.force_subscribe(true, false, false);
 
