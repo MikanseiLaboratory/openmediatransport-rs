@@ -3,12 +3,11 @@
 //! libomtnet treats the protocol control strings as **exact tokens**, not XML:
 //! <https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L31-L35>
 //!
-//! **Sending** therefore emits those same constants (including the tally
-//! `Program==` quirk) so official receivers keep matching them.
+//! **Sending** emits the well-formed tally constants (`Program=`).
 //!
-//! **Receiving** matches the four libomtnet tally constants by exact string
-//! first (those documents are not well-formed XML). Everything else is parsed
-//! with `roxmltree` by element/attribute keys, including well-formed `<OMTTally>`.
+//! **Receiving** matches both those constants and the legacy `Program==` tokens
+//! by exact string first. Everything else is parsed with `roxmltree` by
+//! element/attribute keys.
 
 use crate::error::OmtError;
 use crate::protocol::xml::{XmlElement, escape_xml, parse_bool};
@@ -32,17 +31,27 @@ pub const SUGGESTED_QUALITY: &str = r#"<OMTSettings Quality="Default" />"#;
 pub const SUGGESTED_QUALITY_PREFIX: &str = r#"<OMTSettings Quality="#;
 
 /// Tally: preview on, program off.
-///
-/// NOTE: `Program==` (double equals) is intentional on the wire. Official
-/// receivers compare these four tally strings verbatim and do not XML-parse
-/// them ([libomtnet comment](https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L31-L35)).
-pub const TALLY_PREVIEW: &str = r#"<OMTTally Preview="true" Program=="false" />"#;
+pub const TALLY_PREVIEW: &str = r#"<OMTTally Preview="true" Program="false" />"#;
 /// Tally: preview off, program on.
-pub const TALLY_PROGRAM: &str = r#"<OMTTally Preview="false" Program=="true" />"#;
+pub const TALLY_PROGRAM: &str = r#"<OMTTally Preview="false" Program="true" />"#;
 /// Tally: both on.
-pub const TALLY_PREVIEW_PROGRAM: &str = r#"<OMTTally Preview="true" Program=="true" />"#;
+pub const TALLY_PREVIEW_PROGRAM: &str = r#"<OMTTally Preview="true" Program="true" />"#;
 /// Tally: both off.
-pub const TALLY_NONE: &str = r#"<OMTTally Preview="false" Program=="false" />"#;
+pub const TALLY_NONE: &str = r#"<OMTTally Preview="false" Program="false" />"#;
+/// Legacy tally XML. A historical bug wrote `Program==` instead of `Program=`.
+/// Metadata commands are matched as exact strings for performance and are not
+/// parsed as XML, so devices and earlier library versions that still send these
+/// tokens would otherwise be ignored. Receivers must therefore accept both
+/// forms.
+///
+/// <https://github.com/openmediatransport/libomtnet/issues/51>
+pub const TALLY_PREVIEW_LEGACY: &str = r#"<OMTTally Preview="true" Program=="false" />"#;
+/// Legacy tally: preview off, program on (`Program==`).
+pub const TALLY_PROGRAM_LEGACY: &str = r#"<OMTTally Preview="false" Program=="true" />"#;
+/// Legacy tally: both on (`Program==`).
+pub const TALLY_PREVIEW_PROGRAM_LEGACY: &str = r#"<OMTTally Preview="true" Program=="true" />"#;
+/// Legacy tally: both off (`Program==`).
+pub const TALLY_NONE_LEGACY: &str = r#"<OMTTally Preview="false" Program=="false" />"#;
 
 /// Sender info element name.
 pub const SENDER_INFO_NAME: &str = "OMTInfo";
@@ -74,7 +83,7 @@ pub enum Metadata {
         /// Suggested quality when the `Quality` attribute is present.
         quality: Option<Quality>,
     },
-    /// `<OMTTally Preview="…" Program="…" />` (wire form may use `Program==`).
+    /// `<OMTTally Preview="…" Program="…" />` (legacy wire form may use `Program==`).
     Tally(Tally),
     /// `<OMTInfo … />`
     SenderInfo(SenderInfo),
@@ -207,7 +216,7 @@ pub fn suggested_quality_xml(quality: Quality) -> String {
     format!(r#"<OMTSettings Quality="{}" />"#, quality.as_str())
 }
 
-/// Map a tally state to the exact wire XML constant.
+/// Map a tally state to the well-formed wire XML constant.
 pub fn tally_xml(tally: Tally) -> &'static str {
     match (tally.preview != 0, tally.program != 0) {
         (false, false) => TALLY_NONE,
@@ -234,10 +243,9 @@ pub fn decode_metadata_xml(bytes: &[u8]) -> Result<String, OmtError> {
 
 /// Parse XML into typed documents. `<OMTGroup>` children are flattened.
 ///
-/// Tally uses exact string match against the libomtnet constants first, because
-/// those strings contain `Program==` and are not valid XML
-/// ([source](https://github.com/openmediatransport/libomtnet/blob/2846a962ea69c09a15b082e691b69cfbfead8d1c/src/OMTMetadata.cs#L31-L46)).
-/// Well-formed `<OMTTally>` still goes through the XML parser.
+/// Tally uses exact string match against the libomtnet constants first
+/// (`TALLY_*` and `TALLY_*_LEGACY`). Legacy strings contain `Program==` and are
+/// not valid XML. Well-formed `<OMTTally>` still goes through the XML parser.
 pub fn parse_metadata(xml: &str) -> Vec<Metadata> {
     if let Some(tally) = tally_from_libomtnet_constant(xml) {
         return vec![Metadata::Tally(tally)];
@@ -249,11 +257,13 @@ pub fn parse_metadata(xml: &str) -> Vec<Metadata> {
 }
 
 fn tally_from_libomtnet_constant(xml: &str) -> Option<Tally> {
+    // Program== was a historical bug. Old encoders still emit those tokens,
+    // so both the well-formed and legacy forms must be accepted.
     match xml {
-        TALLY_PREVIEW => Some(Tally::new(1, 0)),
-        TALLY_PROGRAM => Some(Tally::new(0, 1)),
-        TALLY_PREVIEW_PROGRAM => Some(Tally::new(1, 1)),
-        TALLY_NONE => Some(Tally::new(0, 0)),
+        TALLY_PREVIEW | TALLY_PREVIEW_LEGACY => Some(Tally::new(1, 0)),
+        TALLY_PROGRAM | TALLY_PROGRAM_LEGACY => Some(Tally::new(0, 1)),
+        TALLY_PREVIEW_PROGRAM | TALLY_PREVIEW_PROGRAM_LEGACY => Some(Tally::new(1, 1)),
+        TALLY_NONE | TALLY_NONE_LEGACY => Some(Tally::new(0, 0)),
         _ => None,
     }
 }
@@ -481,6 +491,22 @@ mod tests {
         );
         assert_eq!(
             parse_metadata(TALLY_NONE),
+            vec![Metadata::Tally(Tally::new(0, 0))]
+        );
+        assert_eq!(
+            parse_metadata(TALLY_PREVIEW_LEGACY),
+            vec![Metadata::Tally(Tally::new(1, 0))]
+        );
+        assert_eq!(
+            parse_metadata(TALLY_PROGRAM_LEGACY),
+            vec![Metadata::Tally(Tally::new(0, 1))]
+        );
+        assert_eq!(
+            parse_metadata(TALLY_PREVIEW_PROGRAM_LEGACY),
+            vec![Metadata::Tally(Tally::new(1, 1))]
+        );
+        assert_eq!(
+            parse_metadata(TALLY_NONE_LEGACY),
             vec![Metadata::Tally(Tally::new(0, 0))]
         );
     }
