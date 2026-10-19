@@ -40,7 +40,7 @@ pub use discovery::{
 pub use error::OmtError;
 pub use logging::init_logging;
 pub use protocol::metadata::{Metadata, PtzMetadata, parse_metadata};
-pub use receive::{ReceiverConfig, ReceiverSession, SessionState};
+pub use receive::{CompressedVideoFrame, ReceiverConfig, ReceiverSession, SessionState};
 pub use send::{AudioIngress, Sender, SenderConfig};
 pub use settings::{
     KEY_DISCOVERY_SERVER, KEY_NETWORK_PORT_END, KEY_NETWORK_PORT_START, OMT_STORAGE_PATH,

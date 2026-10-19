@@ -107,6 +107,79 @@ struct WireVideo {
     enqueued_at: Instant,
 }
 
+/// A frame exactly as it arrived on the wire, before decoding.
+///
+/// Replay passthrough stores this bitstream, so the picture is never re-encoded.
+/// `sequence` counts the frames the capture published, so a consumer can see a gap
+/// instead of guessing why the pictures jump.
+#[derive(Clone, Debug)]
+pub struct CompressedVideoFrame {
+    /// Timestamp the sender stamped, in 100 ns units.
+    pub pts_100ns: i64,
+    /// Picture width in pixels.
+    pub width: u32,
+    /// Picture height in pixels.
+    pub height: u32,
+    /// Frame rate numerator the sender declared.
+    pub fps_num: u32,
+    /// Frame rate denominator the sender declared.
+    pub fps_den: u32,
+    /// Colour space the sender declared.
+    pub color_space: ColorSpace,
+    /// The sender marked this as a preview-quality frame.
+    pub preview: bool,
+    /// Monotonic counter of captured frames.
+    pub sequence: u64,
+    /// The VMX1 bitstream.
+    pub payload: Vec<u8>,
+}
+
+/// Latest wire-compressed frame, for a consumer that stores the bitstream.
+///
+/// Latest wins: a stale bitstream is worth less than a fresh one, and the frames it
+/// replaced are counted, so a slow consumer shows up as a counted gap rather than as
+/// silence. Capture is off until a consumer asks for it, because it copies every
+/// payload.
+#[derive(Default)]
+struct EncodedCapture {
+    slot: Mutex<Option<CompressedVideoFrame>>,
+    capture: AtomicBool,
+    sequence: AtomicU64,
+    dropped: AtomicU64,
+}
+
+impl EncodedCapture {
+    fn publish(&self, frame: &WireVideo) {
+        if !self.capture.load(Ordering::Relaxed) {
+            return;
+        }
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let captured = CompressedVideoFrame {
+            pts_100ns: frame.timestamp,
+            width: frame.width.max(0) as u32,
+            height: frame.height.max(0) as u32,
+            fps_num: frame.frame_rate_n.max(0) as u32,
+            fps_den: frame.frame_rate_d.max(0) as u32,
+            color_space: frame.color_space,
+            preview: frame.preview,
+            sequence,
+            payload: frame.payload.clone(),
+        };
+        let mut slot = self.slot.lock().unwrap_or_else(|error| error.into_inner());
+        if slot.is_some() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        *slot = Some(captured);
+    }
+
+    fn take(&self) -> Option<CompressedVideoFrame> {
+        self.slot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+}
+
 /// Bounded FIFO handoff for decoded video (preserves frame order for playout).
 struct DecodedVideoQueue {
     slot: Mutex<VecDeque<DecodedVideoFrame>>,
@@ -240,6 +313,8 @@ struct Shared {
     state: Mutex<SessionState>,
     last_error: Mutex<Option<String>>,
     video: DecodedVideoQueue,
+    /// Bitstreams kept for a passthrough consumer.
+    encoded: EncodedCapture,
     #[cfg(feature = "wgpu")]
     gpu: Option<GpuVideoContext>,
     #[cfg(feature = "wgpu")]
@@ -401,6 +476,7 @@ impl ReceiverSession {
             state: Mutex::new(SessionState::Connected),
             last_error: Mutex::new(None),
             video: DecodedVideoQueue::new(VIDEO_DECODED_Q),
+            encoded: EncodedCapture::default(),
             #[cfg(feature = "wgpu")]
             gpu: config.gpu.clone(),
             #[cfg(feature = "wgpu")]
@@ -567,6 +643,36 @@ impl ReceiverSession {
     /// Non-blocking poll for decoded audio.
     pub fn try_recv_audio(&self) -> Option<DecodedAudioFrame> {
         self.audio_rx.try_recv().ok()
+    }
+
+    /// Captures the VMX1 bitstream as it arrives, for a consumer that stores the
+    /// frames without re-encoding them (Replay passthrough).
+    ///
+    /// Off by default: the capture copies every payload, and decoding continues
+    /// either way. Turning it off drops whatever was waiting.
+    pub fn set_encoded_capture(&self, on: bool) {
+        self.shared.encoded.capture.store(on, Ordering::Relaxed);
+        if !on {
+            let _ = self.shared.encoded.take();
+        }
+    }
+
+    /// Whether the bitstream is being captured.
+    pub fn encoded_capture(&self) -> bool {
+        self.shared.encoded.capture.load(Ordering::Relaxed)
+    }
+
+    /// The latest captured bitstream, if capture is on and a frame has arrived.
+    ///
+    /// Latest wins: a consumer that falls behind loses the frames it did not take,
+    /// and [`Self::encoded_dropped`] counts them.
+    pub fn try_recv_vmx1(&self) -> Option<CompressedVideoFrame> {
+        self.shared.encoded.take()
+    }
+
+    /// Frames the capture replaced before the consumer took them.
+    pub fn encoded_dropped(&self) -> u64 {
+        self.shared.encoded.dropped.load(Ordering::Relaxed)
     }
 
     /// Non-blocking poll for metadata.
@@ -1272,6 +1378,7 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
 
         let age_us = wire.enqueued_at.elapsed().as_micros() as u64;
         let t0 = Instant::now();
+        shared.encoded.publish(&wire);
         let WireVideo {
             timestamp,
             width,
@@ -1337,6 +1444,7 @@ fn video_decode_loop_gpu(
 
         let age_us = wire.enqueued_at.elapsed().as_micros() as u64;
         let t0 = Instant::now();
+        shared.encoded.publish(&wire);
         let WireVideo {
             timestamp,
             width,
