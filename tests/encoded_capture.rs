@@ -92,11 +92,11 @@ fn capture_hands_out_the_bitstream_it_was_sent() {
     send_vmx1(&mut sender, width, height, 1_000_000, first);
     let mut decoded = None;
     for _ in 0..200 {
-        if let Some(frame) = session.try_recv_video() {
-            if frame.timestamp == 1_000_000 {
-                decoded = Some(frame);
-                break;
-            }
+        if let Some(frame) = session.try_recv_video()
+            && frame.timestamp == 1_000_000
+        {
+            decoded = Some(frame);
+            break;
         }
         thread::sleep(Duration::from_millis(10));
     }
