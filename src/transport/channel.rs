@@ -16,6 +16,8 @@ pub struct Channel {
     pub frame_type: FrameType,
     /// Incoming reassembly buffer.
     buf: Vec<u8>,
+    /// Read scratch reused by [`Channel::recv_frame`] (lazily sized).
+    scratch: Vec<u8>,
 }
 
 impl Channel {
@@ -24,6 +26,7 @@ impl Channel {
         Self {
             frame_type,
             buf: Vec::with_capacity(VIDEO_MIN_HINT),
+            scratch: Vec::new(),
         }
     }
 
@@ -51,48 +54,22 @@ impl Channel {
         reader: &mut R,
         scratch: &mut [u8],
     ) -> Result<Option<AssembledFrame>, OmtError> {
-        if let Some(frame) = self.try_pop_frame()? {
-            return Ok(Some(frame));
-        }
-        match reader.read(scratch) {
-            Ok(0) => {
-                if self.buf.is_empty() {
-                    return Ok(None);
-                }
-                return Err(OmtError::Network("connection closed mid-frame".into()));
-            }
-            Ok(n) => {
-                if self.buf.len().saturating_add(n) > MAX_REASSEMBLY {
-                    self.buf.clear();
-                    return Err(OmtError::Protocol("reassembly buffer overflow".into()));
-                }
-                self.buf.extend_from_slice(&scratch[..n]);
-            }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::Interrupted
-                ) => {}
-            Err(e) => return Err(e.into()),
-        }
-        match self.try_pop_frame()? {
-            Some(frame) => Ok(Some(frame)),
-            None => Err(OmtError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "incomplete OMT frame",
-            ))),
-        }
+        recv_frame_impl(&mut self.buf, scratch, reader)
     }
 
     /// Read available data (capped at 128 KiB per call) and try to pop a complete frame.
+    ///
+    /// Uses a scratch buffer owned by the channel, so polling loops do not
+    /// allocate on every call. Callers with their own reusable scratch can
+    /// use [`Channel::recv_frame_into`] instead.
     pub fn recv_frame<R: Read>(
         &mut self,
         reader: &mut R,
     ) -> Result<Option<AssembledFrame>, OmtError> {
-        let mut tmp = vec![0u8; NETWORK_RECEIVE_MAX_TRANSFER];
-        self.recv_frame_into(reader, &mut tmp)
+        if self.scratch.len() < NETWORK_RECEIVE_MAX_TRANSFER {
+            self.scratch.resize(NETWORK_RECEIVE_MAX_TRANSFER, 0);
+        }
+        recv_frame_impl(&mut self.buf, &mut self.scratch, reader)
     }
 
     /// Push bytes into the reassembly buffer (for testing / async adapters).
@@ -103,43 +80,9 @@ impl Channel {
     }
 
     /// Try to extract one complete frame from the buffer without reading.
+    #[allow(dead_code)]
     pub fn try_pop_frame(&mut self) -> Result<Option<AssembledFrame>, OmtError> {
-        if self.buf.len() < HEADER_SIZE {
-            return Ok(None);
-        }
-        let header = match FrameHeader::from_bytes(&self.buf) {
-            Ok(h) => h,
-            Err(e) => {
-                self.buf.clear();
-                return Err(e);
-            }
-        };
-        if header.data_length < 0 {
-            self.buf.clear();
-            return Err(OmtError::Protocol("negative data_length".into()));
-        }
-        let data_len = header.data_length as usize;
-        let max = max_payload_for(header.frame_type);
-        if data_len > max {
-            self.buf.clear();
-            return Err(OmtError::Protocol(format!(
-                "data_length {data_len} exceeds max {max}"
-            )));
-        }
-        if !is_valid_frame_type(header.frame_type) {
-            self.buf.clear();
-            return Err(OmtError::Protocol(format!(
-                "invalid frame type {}",
-                header.frame_type.0
-            )));
-        }
-        let total = HEADER_SIZE + data_len;
-        if self.buf.len() < total {
-            return Ok(None);
-        }
-        let remainder = self.buf.split_off(total);
-        let frame_bytes = std::mem::replace(&mut self.buf, remainder);
-        AssembledFrame::from_bytes(&frame_bytes).map(Some)
+        try_pop_frame_impl(&mut self.buf)
     }
 
     /// Drop buffered bytes (protocol desync recovery).
@@ -151,6 +94,100 @@ impl Channel {
     #[allow(dead_code)]
     pub fn buffered_len(&self) -> usize {
         self.buf.len()
+    }
+}
+
+/// `Channel::try_pop_frame` over a raw reassembly buffer.
+///
+/// The consumed prefix is removed with `drain`, which shifts the remainder to
+/// the front of the same allocation. The previous `split_off` variant moved the
+/// remainder into a fresh `Vec` every frame, so the reassembly buffer lost its
+/// capacity and every subsequent read regrew it while recopying the contents.
+fn try_pop_frame_impl(buf: &mut Vec<u8>) -> Result<Option<AssembledFrame>, OmtError> {
+    if buf.len() < HEADER_SIZE {
+        return Ok(None);
+    }
+    let header = match FrameHeader::from_bytes(buf) {
+        Ok(h) => h,
+        Err(e) => {
+            buf.clear();
+            return Err(e);
+        }
+    };
+    if header.data_length < 0 {
+        buf.clear();
+        return Err(OmtError::Protocol("negative data_length".into()));
+    }
+    let data_len = header.data_length as usize;
+    let max = max_payload_for(header.frame_type);
+    if data_len > max {
+        buf.clear();
+        return Err(OmtError::Protocol(format!(
+            "data_length {data_len} exceeds max {max}"
+        )));
+    }
+    if !is_valid_frame_type(header.frame_type) {
+        buf.clear();
+        return Err(OmtError::Protocol(format!(
+            "invalid frame type {}",
+            header.frame_type.0
+        )));
+    }
+    let total = HEADER_SIZE + data_len;
+    if buf.len() < total {
+        return Ok(None);
+    }
+    let frame = match AssembledFrame::from_bytes(&buf[..total]) {
+        Ok(frame) => frame,
+        Err(e) => {
+            buf.clear();
+            return Err(e);
+        }
+    };
+    buf.drain(..total);
+    Ok(Some(frame))
+}
+
+/// `Channel::recv_frame` / `Channel::recv_frame_into` over a raw reassembly
+/// buffer and scratch.
+fn recv_frame_impl<R: Read>(
+    buf: &mut Vec<u8>,
+    scratch: &mut [u8],
+    reader: &mut R,
+) -> Result<Option<AssembledFrame>, OmtError> {
+    if let Some(frame) = try_pop_frame_impl(buf)? {
+        return Ok(Some(frame));
+    }
+    match reader.read(scratch) {
+        Ok(0) => {
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            return Err(OmtError::Network("connection closed mid-frame".into()));
+        }
+        Ok(n) => {
+            if buf.len().saturating_add(n) > MAX_REASSEMBLY {
+                buf.clear();
+                return Err(OmtError::Protocol("reassembly buffer overflow".into()));
+            }
+            buf.extend_from_slice(&scratch[..n]);
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+            ) => {}
+        Err(e) => return Err(e.into()),
+    }
+    match try_pop_frame_impl(buf)? {
+        Some(frame) => Ok(Some(frame)),
+        // Allocation-free: this path runs for every partial read of a large
+        // frame. Callers match on the error kind, not the message.
+        None => Err(OmtError::Io(std::io::Error::from(
+            std::io::ErrorKind::TimedOut,
+        ))),
     }
 }
 

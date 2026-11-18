@@ -345,7 +345,6 @@ impl Sender {
             let Some(listener) = self.listener.as_ref() else {
                 return Ok(false);
             };
-            listener.set_nonblocking(true)?;
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => incoming.push(stream),
@@ -715,7 +714,9 @@ impl Sender {
             frame.write_into(&mut full);
             full
         };
-        let preview = if ft.contains(FrameType::VIDEO) {
+        // Only build the preview variant when some peer actually asked for
+        // preview; otherwise the DC-prefix copy was discarded unused.
+        let preview = if ft.contains(FrameType::VIDEO) && self.subscribed.preview {
             preview_video_bytes(frame)
         } else {
             None
@@ -1147,6 +1148,9 @@ fn bind_port_range_between(start: u16, end: u16) -> Result<(TcpListener, u16), O
             let addr = SocketAddr::from(([0, 0, 0, 0], port));
             if let Ok(sock) = listen(addr) {
                 let listener = into_listener(sock)?;
+                // `poll_accept` runs per frame on the sender hot path; flip the
+                // listener to non-blocking once here instead of on every poll.
+                listener.set_nonblocking(true)?;
                 return Ok((listener, port));
             }
         }
