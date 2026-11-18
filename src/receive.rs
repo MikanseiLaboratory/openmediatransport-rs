@@ -1369,7 +1369,7 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
             Ok(w) => {
                 let _ = shared
                     .wire_depth
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                         Some(v.saturating_sub(1))
                     });
                 w
@@ -1433,7 +1433,7 @@ fn video_decode_loop_gpu(
             Ok(w) => {
                 let _ = shared
                     .wire_depth
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                         Some(v.saturating_sub(1))
                     });
                 w

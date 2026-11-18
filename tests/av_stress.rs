@@ -50,7 +50,7 @@ fn audio_independent_of_video_decode() {
     let samples = 480usize;
     let channels = 2usize;
     let mut pcm = vec![0u8; channels * samples * 4];
-    for (i, chunk) in pcm.chunks_exact_mut(4).enumerate() {
+    for (i, chunk) in pcm.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let s = ((i % 64) as f32) / 64.0;
         chunk.copy_from_slice(&s.to_le_bytes());
     }
