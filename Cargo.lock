@@ -658,7 +658,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openmediatransport"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "image",
@@ -1083,9 +1083,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vmx"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ceb9c52a194e6510ee4285dc358773a5e9e53bdda9deabb34e9afb3e60df331c"
+checksum = "d22632ffc3e80879f089f40c1a06c4460956f19096fa70312e19e88ad52dc7b7"
 dependencies = [
  "bytemuck",
  "pollster",
