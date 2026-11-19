@@ -105,7 +105,7 @@ fn bgra_to_rgb(
         return Err(format!("BGRA buffer too small: {} < {expected}", bgra.len()).into());
     }
     let mut rgb = Vec::with_capacity((width as usize) * 3 * (height as usize));
-    for px in bgra[..expected].chunks_exact(4) {
+    for px in bgra[..expected].as_chunks::<4>().0 {
         let (b, g, r, _a) = (px[0], px[1], px[2], px[3]);
         rgb.extend_from_slice(&[r, g, b]);
     }

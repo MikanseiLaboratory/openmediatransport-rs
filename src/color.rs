@@ -33,7 +33,12 @@ pub fn bgra_to_rgba_into(bgra: &[u8], rgba: &mut [u8]) {
 
 /// Scalar BGRA8 → RGBA8 (also used as the SSSE3 tail).
 pub fn bgra_to_rgba_scalar(bgra: &[u8], rgba: &mut [u8]) {
-    for (dst, src) in rgba.chunks_exact_mut(4).zip(bgra.chunks_exact(4)) {
+    for (dst, src) in rgba
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(bgra.as_chunks::<4>().0)
+    {
         dst[0] = src[2];
         dst[1] = src[1];
         dst[2] = src[0];
@@ -72,7 +77,7 @@ pub unsafe fn bgra_to_rgba_ssse3(bgra: &[u8], rgba: &mut [u8]) {
 /// Replace RGB with grayscale alpha visualization (A→RGB, A=255).
 pub fn bgra_alpha_mask(bgra: &[u8]) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(bgra.len());
-    for px in bgra.chunks_exact(4) {
+    for px in bgra.as_chunks::<4>().0 {
         let a = px[3];
         rgba.extend_from_slice(&[a, a, a, 255]);
     }

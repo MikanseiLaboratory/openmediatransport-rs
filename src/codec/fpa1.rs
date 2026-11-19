@@ -75,20 +75,23 @@ pub fn decode_planar_into(
         .checked_mul(samples_per_channel)
         .and_then(|n| n.checked_mul(AUDIO_SAMPLE_SIZE))
         .ok_or_else(|| OmtError::InvalidArgument("FPA1 size overflow".into()))?;
+    // Fill each plane exactly once: copy the active planes from the payload,
+    // zero-extend the inactive ones. `resize(need, 0)` up front would memset
+    // the whole buffer and then overwrite every active plane a second time.
     out.clear();
-    out.resize(need, 0);
-
+    out.reserve(need);
     let mut offset = 0usize;
     for i in 0..channels {
         let flag = 1u32 << i;
-        let plane_off = i * samples_per_channel * AUDIO_SAMPLE_SIZE;
+        let bytes = samples_per_channel * AUDIO_SAMPLE_SIZE;
         if (active_channels & flag) == flag {
-            let bytes = samples_per_channel * AUDIO_SAMPLE_SIZE;
-            out[plane_off..plane_off + bytes].copy_from_slice(&data[offset..offset + bytes]);
+            out.extend_from_slice(&data[offset..offset + bytes]);
             offset += bytes;
+        } else {
+            out.resize(out.len() + bytes, 0);
         }
-        // inactive channels already zero-filled by resize
     }
+    debug_assert_eq!(out.len(), need);
     Ok(())
 }
 

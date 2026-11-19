@@ -36,6 +36,10 @@ const AUDIO_Q: usize = 10;
 const METADATA_Q: usize = 60;
 const RECONNECT_MIN: Duration = Duration::from_millis(250);
 const RECONNECT_MAX: Duration = Duration::from_secs(2);
+/// Video socket read chunk. The 128 KiB protocol read cap turns a multi-
+/// megabit frame into many partial reads; a larger scratch keeps the syscall
+/// count per frame low at a modest per-connection memory cost.
+const VIDEO_READ_CHUNK: usize = 512 * 1024;
 
 /// High-level receiver connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1135,12 +1139,13 @@ fn video_reader_loop(
 ) {
     let mut channel = Channel::new(FrameType::VIDEO | FrameType::AUDIO | FrameType::METADATA);
     let mut pool = BufferPool::video();
-    let mut read_buf = pool.take(crate::types::NETWORK_RECEIVE_MAX_TRANSFER);
-    read_buf.resize(crate::types::NETWORK_RECEIVE_MAX_TRANSFER, 0);
+    let mut read_buf = pool.take(VIDEO_READ_CHUNK);
+    read_buf.resize(VIDEO_READ_CHUNK, 0);
+    // Constant for the connection: set once instead of one setsockopt per read.
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
 
     while !shared.stop.load(Ordering::Acquire) {
         flush_outbound_metadata(&mut stream, shared);
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
         match channel.recv_frame_into(&mut stream, &mut read_buf) {
             Ok(Some(frame)) => {
                 let nbytes = frame.header.data_length.max(0) as usize + 16;
@@ -1185,9 +1190,10 @@ fn audio_reader_loop(
     let mut read_buf = pool.take(crate::types::NETWORK_RECEIVE_MAX_TRANSFER);
     read_buf.resize(crate::types::NETWORK_RECEIVE_MAX_TRANSFER, 0);
     let mut pcm_scratch = pool.take_audio();
+    // Constant for the connection: set once instead of one setsockopt per read.
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(10)));
 
     while !shared.stop.load(Ordering::Acquire) {
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(10)));
         match channel.recv_frame_into(&mut stream, &mut read_buf) {
             Ok(Some(frame)) => {
                 let nbytes = frame.header.data_length.max(0) as usize + 16;
@@ -1253,9 +1259,9 @@ fn dispatch_av_frame(
             record_drop_wire(&shared.stats);
             return;
         }
-        let mut payload = pool.take(frame.data.len().max(1));
-        payload.clear();
-        payload.extend_from_slice(&frame.data);
+        // `frame.data` is already an owned, exact-size buffer produced by the
+        // reassembly parse; copying it through the (never-recycled) pool just
+        // added a full-payload memcpy per frame.
         let wire = WireVideo {
             timestamp: frame.header.timestamp,
             width: v.width,
@@ -1264,7 +1270,7 @@ fn dispatch_av_frame(
             frame_rate_d: v.frame_rate_d.max(1),
             color_space: v.color_space,
             preview: v.flags.contains(VideoFlags::PREVIEW),
-            payload,
+            payload: frame.data,
             metadata: meta,
             enqueued_at: Instant::now(),
         };
@@ -1272,13 +1278,10 @@ fn dispatch_av_frame(
             Ok(()) => {
                 shared.wire_depth.fetch_add(1, Ordering::Relaxed);
             }
-            Err(TrySendError::Full(wire)) => {
+            Err(TrySendError::Full(_)) => {
                 record_drop_wire(&shared.stats);
-                pool.give(wire.payload);
             }
-            Err(TrySendError::Disconnected(wire)) => {
-                pool.give(wire.payload);
-            }
+            Err(TrySendError::Disconnected(_)) => {}
         }
         return;
     }
@@ -1360,14 +1363,13 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
 
     let mut codec: Option<vmx::Codec> = None;
     let mut decode_buf = Vec::new();
-    let mut pool = BufferPool::video();
 
     while !shared.stop.load(Ordering::Acquire) {
         let wire = match wire_rx.recv_timeout(Duration::from_millis(20)) {
             Ok(w) => {
                 let _ = shared
                     .wire_depth
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                         Some(v.saturating_sub(1))
                     });
                 w
@@ -1415,7 +1417,6 @@ fn video_decode_loop(shared: Arc<Shared>, wire_rx: MpscReceiver<WireVideo>) {
                 codec = None;
             }
         }
-        pool.give(payload);
     }
 }
 
@@ -1426,14 +1427,13 @@ fn video_decode_loop_gpu(
     ctx: GpuVideoContext,
 ) {
     let mut codec: Option<vmx::Codec> = None;
-    let mut pool = BufferPool::video();
 
     while !shared.stop.load(Ordering::Acquire) {
         let wire = match wire_rx.recv_timeout(Duration::from_millis(20)) {
             Ok(w) => {
                 let _ = shared
                     .wire_depth
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                         Some(v.saturating_sub(1))
                     });
                 w
@@ -1481,7 +1481,6 @@ fn video_decode_loop_gpu(
                 codec = None;
             }
         }
-        pool.give(payload);
     }
 }
 

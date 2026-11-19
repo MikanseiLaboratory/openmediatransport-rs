@@ -45,6 +45,9 @@ struct Peer {
     stream: TcpStream,
     state: PeerState,
     inbound: Vec<u8>,
+    /// Write timeout currently programmed on the socket, so the per-frame
+    /// `set_write_timeout` syscall only happens when the frame type changes.
+    write_timeout: Option<Duration>,
 }
 
 /// Maximum buffered inbound control bytes per peer (subscribe frames are tiny).
@@ -345,7 +348,6 @@ impl Sender {
             let Some(listener) = self.listener.as_ref() else {
                 return Ok(false);
             };
-            listener.set_nonblocking(true)?;
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => incoming.push(stream),
@@ -401,6 +403,8 @@ impl Sender {
                 stream,
                 state: PeerState::default(),
                 inbound: Vec::new(),
+                // Both configure paths above program this timeout at accept.
+                write_timeout: Some(NETWORK_SEND_TIMEOUT),
             },
         );
         Ok(())
@@ -411,10 +415,9 @@ impl Sender {
         let mut peers = self.peers.lock().unwrap();
         let mut dead = Vec::new();
         for (id, peer) in peers.iter_mut() {
-            // `write_peers` briefly sets blocking; a failed write used to leave
-            // the socket blocking so this `read` stalled the encode thread.
-            let _ = peer.stream.set_nonblocking(true);
-            let _ = peer.stream.set_read_timeout(None);
+            // Every writer restores nonblocking mode while holding this lock
+            // (and drops the peer if it cannot), and sender peers never carry
+            // a read timeout, so no per-poll socket syscalls are needed here.
             let mut buf = [0u8; 8192];
             match peer.stream.read(&mut buf) {
                 Ok(0) => dead.push(*id),
@@ -715,7 +718,9 @@ impl Sender {
             frame.write_into(&mut full);
             full
         };
-        let preview = if ft.contains(FrameType::VIDEO) {
+        // Only build the preview variant when some peer actually asked for
+        // preview; otherwise the DC-prefix copy was discarded unused.
+        let preview = if ft.contains(FrameType::VIDEO) && self.subscribed.preview {
             preview_video_bytes(frame)
         } else {
             None
@@ -1025,10 +1030,20 @@ fn write_peers(peers: &Mutex<HashMap<usize, Peer>>, wire: &WireBytes) {
         } else {
             &wire.full
         };
-        let _ = peer.stream.set_write_timeout(Some(timeout));
+        // Frame-type-constant timeout: only a type change needs a syscall.
+        if peer.write_timeout != Some(timeout) {
+            let _ = peer.stream.set_write_timeout(Some(timeout));
+            peer.write_timeout = Some(timeout);
+        }
         let _ = peer.stream.set_nonblocking(false);
         let result = peer.stream.write_all(bytes);
-        let _ = peer.stream.set_nonblocking(true);
+        // Restore nonblocking before classifying the write: a peer that
+        // cannot return to nonblocking mode is broken, so drop it rather
+        // than silently leaving the mode flipped.
+        if peer.stream.set_nonblocking(true).is_err() {
+            dead.push(*id);
+            continue;
+        }
         match result {
             Ok(()) => {}
             Err(e)
@@ -1147,6 +1162,9 @@ fn bind_port_range_between(start: u16, end: u16) -> Result<(TcpListener, u16), O
             let addr = SocketAddr::from(([0, 0, 0, 0], port));
             if let Ok(sock) = listen(addr) {
                 let listener = into_listener(sock)?;
+                // `poll_accept` runs per frame on the sender hot path; flip the
+                // listener to non-blocking once here instead of on every poll.
+                listener.set_nonblocking(true)?;
                 return Ok((listener, port));
             }
         }
@@ -1309,6 +1327,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(addr).unwrap();
         let (server, _) = listener.accept().unwrap();
+        // Production peers always enter the map nonblocking (`add_peer`);
+        // mirror that here so `poll_peer_metadata` cannot block on reads.
+        let _ = server.set_nonblocking(true);
         std::mem::forget(client);
         Peer {
             stream: server,
@@ -1317,6 +1338,7 @@ mod tests {
                 ..PeerState::default()
             },
             inbound: Vec::new(),
+            write_timeout: None,
         }
     }
 

@@ -523,7 +523,7 @@ fn accept_peer(
 
 fn join_peers(shared: &Arc<Mutex<Shared>>) {
     let threads = if let Ok(mut g) = shared.lock() {
-        g.peer_threads.drain(..).collect::<Vec<_>>()
+        std::mem::take(&mut g.peer_threads)
     } else {
         Vec::new()
     };
