@@ -662,6 +662,7 @@ version = "0.2.2"
 dependencies = [
  "bytes",
  "image",
+ "libc",
  "mdns-sd",
  "roxmltree",
  "socket2",
