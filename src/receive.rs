@@ -32,7 +32,9 @@ use crate::gpu::{DecodedVideoGpuFrame, GpuVideoContext};
 const VIDEO_WIRE_Q: usize = 3;
 /// Decoded video depth-1 FIFO (latest-wins when full).
 const VIDEO_DECODED_Q: usize = 1;
-const AUDIO_Q: usize = 10;
+/// Decoded-audio queue depth in frames. 64 frames is ~640 ms at 10 ms/frame,
+/// which absorbs decode stalls without dropping audio on slow hosts.
+const AUDIO_Q: usize = 64;
 const METADATA_Q: usize = 60;
 const RECONNECT_MIN: Duration = Duration::from_millis(250);
 const RECONNECT_MAX: Duration = Duration::from_secs(2);
