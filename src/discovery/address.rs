@@ -100,14 +100,28 @@ impl OmtAddress {
     }
 
     fn limit_name_length(&mut self) {
-        let full = self.instance_name();
-        if full.len() <= MAX_INSTANCE_NAME_LENGTH {
+        // DNS-SD instance labels are capped at 63 bytes. Keep the source name
+        // first, then give the machine name the remaining space: gethostname()
+        // can return long cloud/CI host names that do not fit on their own, and
+        // an over-long label makes the sender undiscoverable at all.
+        if self.machine_name.is_empty() {
+            self.name = truncate_bytes(&self.name, MAX_INSTANCE_NAME_LENGTH)
+                .trim()
+                .to_string();
             return;
         }
-        let oversize = full.len() - MAX_INSTANCE_NAME_LENGTH;
-        if oversize < self.name.len() {
-            let keep = self.name.len() - oversize;
-            self.name = self.name[..keep].trim().to_string();
+        const SEPARATOR: usize = 3; // " (" + ")"
+        let name_max = MAX_INSTANCE_NAME_LENGTH.saturating_sub(SEPARATOR + 1);
+        if self.name.len() > name_max {
+            self.name = truncate_bytes(&self.name, name_max).trim().to_string();
+        }
+        let machine_max = MAX_INSTANCE_NAME_LENGTH
+            .saturating_sub(SEPARATOR + self.name.len())
+            .max(1);
+        if self.machine_name.len() > machine_max {
+            self.machine_name = truncate_bytes(&self.machine_name, machine_max)
+                .trim()
+                .to_string();
         }
     }
 
@@ -242,6 +256,18 @@ impl std::fmt::Display for OmtAddress {
 
 fn sanitize_name(s: String) -> String {
     s.replace(['\0', '\n', '\r'], "").trim().to_string()
+}
+
+/// Longest prefix of `s` that fits in `max` bytes and ends on a char boundary.
+fn truncate_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// `HOST (Cam)._omt._tcp.local.` → `HOST (Cam)`.
@@ -410,5 +436,35 @@ mod tests {
         let a = OmtAddress::local("Camera", 6400).unwrap();
         assert!(!a.machine_name.is_empty());
         assert!(a.instance_name().ends_with("(Camera)"));
+    }
+
+    #[test]
+    fn long_machine_name_still_fits_dns_sd_label() {
+        // GitHub's macOS runners report host names like this; the machine part
+        // alone is longer than a DNS-SD instance label may be.
+        let mut a = OmtAddress::new("Camera", 6400);
+        a.machine_name =
+            "SAT12-BQ152-62568726-D57A-443C-8E0C-892490A3068B-3E13BAA0E36F.LOCAL".into();
+        a.limit_name_length();
+        let instance = a.instance_name();
+        assert!(instance.len() <= MAX_INSTANCE_NAME_LENGTH, "{instance}");
+        assert!(instance.ends_with(" (Camera)"), "{instance}");
+        assert!(!a.machine_name.is_empty());
+    }
+
+    #[test]
+    fn long_source_name_is_truncated_on_char_boundaries() {
+        let mut a = OmtAddress::new("カメラ".repeat(10), 6400);
+        a.machine_name = "HOST".into();
+        a.limit_name_length();
+        assert!(a.instance_name().len() <= MAX_INSTANCE_NAME_LENGTH);
+        assert!(!a.name.is_empty());
+        assert!(!a.name.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn long_name_without_machine_fits_label() {
+        let a = OmtAddress::new("x".repeat(80), 6400);
+        assert!(a.instance_name().len() <= MAX_INSTANCE_NAME_LENGTH);
     }
 }
