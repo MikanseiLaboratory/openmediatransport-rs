@@ -276,9 +276,11 @@ fn grow_save_buf(len: usize) -> Result<usize, OmtError> {
 pub(crate) fn vmx_profile(quality: Quality) -> vmx::Profile {
     match quality {
         Quality::Low => vmx::Profile::OmtLq,
-        Quality::Medium => vmx::Profile::OmtSq,
+        // libomtnet maps `VMXProfile.Default` to `OMT_SQ` before calling into
+        // libvmx (`OMTVMX1Codec.cs`), because libvmx would otherwise promote
+        // Default to plain HQ (99) and produce a non-OMT stream (issue #51).
+        Quality::Medium | Quality::Default => vmx::Profile::OmtSq,
         Quality::High => vmx::Profile::OmtHq,
-        Quality::Default => vmx::Profile::Default,
     }
 }
 
@@ -420,5 +422,23 @@ mod tests {
             .encode_raw(&frame, Quality::High)
             .expect("1080p BGRA encode");
         assert!(!bits.is_empty());
+    }
+
+    #[test]
+    fn default_quality_maps_to_omt_sq() {
+        // libomtnet resolves Default to OMT_SQ; vmx's own Default would become
+        // HQ (99) and break OMT compatibility (issue #51).
+        assert_eq!(vmx_profile(Quality::Default), vmx::Profile::OmtSq);
+        assert_eq!(vmx_profile(Quality::Medium), vmx::Profile::OmtSq);
+        assert_eq!(vmx_profile(Quality::Low), vmx::Profile::OmtLq);
+        assert_eq!(vmx_profile(Quality::High), vmx::Profile::OmtHq);
+    }
+
+    #[test]
+    fn default_quality_encoder_uses_omt_sq() {
+        let mut enc = VideoEncoder::new();
+        enc.encode_raw(&uyvy_frame(64, 64), Quality::Default)
+            .unwrap();
+        assert_eq!(enc.profile, vmx::Profile::OmtSq);
     }
 }
