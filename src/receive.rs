@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::audio_queue::{AudioQueue, DEFAULT_MAX_LATENCY};
 use crate::codec::fpa1;
 use crate::discovery::address::OmtAddress;
 use crate::error::OmtError;
@@ -32,9 +33,6 @@ use crate::gpu::{DecodedVideoGpuFrame, GpuVideoContext};
 const VIDEO_WIRE_Q: usize = 3;
 /// Decoded video depth-1 FIFO (latest-wins when full).
 const VIDEO_DECODED_Q: usize = 1;
-/// Decoded-audio queue depth in frames. 64 frames is ~640 ms at 10 ms/frame,
-/// which absorbs decode stalls without dropping audio on slow hosts.
-const AUDIO_Q: usize = 64;
 const METADATA_Q: usize = 60;
 const RECONNECT_MIN: Duration = Duration::from_millis(250);
 const RECONNECT_MAX: Duration = Duration::from_secs(2);
@@ -76,6 +74,16 @@ pub struct ReceiverConfig {
     pub connect_timeout: Duration,
     /// Automatically reconnect after socket failures (250 ms … 2 s backoff).
     pub auto_reconnect: bool,
+    /// Maximum time decoded audio may wait in the receiver queue.
+    ///
+    /// The queue is bounded two ways, whichever is exceeded first:
+    /// - total media duration of queued frames (the playback backlog), and
+    /// - wall-clock age of the oldest queued frame.
+    ///
+    /// Older frames are dropped first. This is an upper bound on the latency the
+    /// receiver adds, not a fixed delay: a drained queue sits at zero. Defaults
+    /// to 100 ms and is clamped to 1 ms ..= 2 s at connect time.
+    pub audio_max_latency: Duration,
     /// Host GPU for VMX texture decode. Frames are published as
     /// [`DecodedVideoGpuFrame`] via [`ReceiverSession::try_recv_video_gpu`].
     /// GPU work is submitted on this queue; later submits on the same queue
@@ -93,6 +101,7 @@ impl Default for ReceiverConfig {
             preview: false,
             connect_timeout: Duration::from_secs(5),
             auto_reconnect: true,
+            audio_max_latency: DEFAULT_MAX_LATENCY,
             #[cfg(feature = "wgpu")]
             gpu: None,
         }
@@ -406,7 +415,7 @@ pub struct ReceiverSession {
     address: String,
     config: ReceiverConfig,
     shared: Arc<Shared>,
-    audio_rx: MpscReceiver<DecodedAudioFrame>,
+    audio_queue: Arc<AudioQueue>,
     metadata_rx: MpscReceiver<MetadataFrame>,
     joins: Vec<JoinHandle<()>>,
     can_send_metadata: bool,
@@ -459,7 +468,6 @@ impl ReceiverSession {
                 config.frame_types,
                 config.quality,
                 config.preview,
-                false,
             )?;
             initial_video = Some(stream);
         }
@@ -470,7 +478,6 @@ impl ReceiverSession {
                 Some(&mut stream),
                 config.frame_types,
                 config.quality,
-                false,
                 false,
             )?;
             initial_audio = Some(stream);
@@ -496,7 +503,7 @@ impl ReceiverSession {
         });
 
         let (video_wire_tx, video_wire_rx) = sync_channel::<WireVideo>(VIDEO_WIRE_Q);
-        let (audio_tx, audio_rx) = sync_channel::<DecodedAudioFrame>(AUDIO_Q);
+        let audio_queue = Arc::new(AudioQueue::new(config.audio_max_latency));
         let (metadata_tx, metadata_rx) = sync_channel::<MetadataFrame>(METADATA_Q);
 
         let mut joins = Vec::new();
@@ -517,7 +524,6 @@ impl ReceiverSession {
             let endpoints = endpoints.clone();
             let video_wire_tx = video_wire_tx.clone();
             let metadata_tx = metadata_tx.clone();
-            let audio_on_av = audio_tx.clone();
             joins.push(
                 thread::Builder::new()
                     .name("omt-rx-video-io".into())
@@ -529,8 +535,6 @@ impl ReceiverSession {
                             SocketRole::Video {
                                 video_tx: video_wire_tx,
                                 metadata_tx,
-                                audio_tx: audio_on_av,
-                                decode_audio: false,
                             },
                             Some(stream),
                         );
@@ -543,7 +547,7 @@ impl ReceiverSession {
             let shared_c = Arc::clone(&shared);
             let cfg = config.clone();
             let endpoints = endpoints.clone();
-            let audio_tx = audio_tx.clone();
+            let audio_queue = Arc::clone(&audio_queue);
             joins.push(
                 thread::Builder::new()
                     .name("omt-rx-audio-io".into())
@@ -552,7 +556,7 @@ impl ReceiverSession {
                             endpoints,
                             cfg,
                             shared_c,
-                            SocketRole::Audio { audio_tx },
+                            SocketRole::Audio { queue: audio_queue },
                             Some(stream),
                         );
                     })
@@ -561,14 +565,13 @@ impl ReceiverSession {
         }
 
         drop(video_wire_tx);
-        drop(audio_tx);
         drop(metadata_tx);
 
         Ok(Self {
             address,
             config,
             shared,
-            audio_rx,
+            audio_queue,
             metadata_rx,
             joins,
             can_send_metadata: want_video,
@@ -647,8 +650,19 @@ impl ReceiverSession {
     }
 
     /// Non-blocking poll for decoded audio.
+    ///
+    /// Frames older than [`ReceiverConfig::audio_max_latency`] are discarded
+    /// first, so this can return `None` even when frames were queued.
     pub fn try_recv_audio(&self) -> Option<DecodedAudioFrame> {
-        self.audio_rx.try_recv().ok()
+        self.audio_queue.try_pop()
+    }
+
+    /// Wait up to `timeout` for decoded audio.
+    ///
+    /// Frames that exceed [`ReceiverConfig::audio_max_latency`] are discarded
+    /// while waiting, so the returned frame is never older than the budget.
+    pub fn recv_audio_timeout(&self, timeout: Duration) -> Option<DecodedAudioFrame> {
+        self.audio_queue.recv_timeout(timeout, &self.shared.stop)
     }
 
     /// Captures the VMX1 bitstream as it arrives, for a consumer that stores the
@@ -734,7 +748,16 @@ impl ReceiverSession {
 
     /// Snapshot of session statistics (includes live queue depths).
     pub fn statistics(&self) -> SessionStatistics {
+        // Take the queue snapshot before the statistics lock: the audio thread
+        // only takes the queue lock, so this ordering cannot deadlock.
+        let audio = self.audio_queue.snapshot();
         let mut s = self.shared.stats.lock().map(|g| *g).unwrap_or_default();
+        s.audio_queue_depth = audio.depth;
+        s.audio_latency_us = audio.latency_us;
+        s.audio_oldest_us = audio.oldest_us;
+        s.audio_latency_us_peak = audio.peak_us;
+        s.audio_frames_dropped_stale = audio.stale;
+        s.frames_dropped_audio = s.frames_dropped_audio.saturating_add(audio.stale);
         s.wire_queue_depth = self.shared.wire_depth.load(Ordering::Relaxed);
         #[cfg(feature = "wgpu")]
         {
@@ -758,6 +781,7 @@ impl ReceiverSession {
         self.shared.shutdown_io();
         // Wake any waiter on the latest-video condvar.
         self.shared.video.cv.notify_all();
+        self.audio_queue.notify_all();
         for j in self.joins.drain(..) {
             let _ = j.join();
         }
@@ -771,6 +795,7 @@ impl Drop for ReceiverSession {
         self.shared.stop.store(true, Ordering::Release);
         self.shared.shutdown_io();
         self.shared.video.cv.notify_all();
+        self.audio_queue.notify_all();
         while let Some(j) = self.joins.pop() {
             let _ = j.join();
         }
@@ -782,11 +807,9 @@ enum SocketRole {
     Video {
         video_tx: SyncSender<WireVideo>,
         metadata_tx: SyncSender<MetadataFrame>,
-        audio_tx: SyncSender<DecodedAudioFrame>,
-        decode_audio: bool,
     },
     Audio {
-        audio_tx: SyncSender<DecodedAudioFrame>,
+        queue: Arc<AudioQueue>,
     },
 }
 
@@ -849,20 +872,16 @@ fn socket_supervisor(
             SocketRole::Video {
                 video_tx,
                 metadata_tx,
-                audio_tx,
-                decode_audio,
             } => {
-                video_reader_loop(
-                    stream,
-                    &shared,
-                    video_tx,
-                    metadata_tx,
-                    audio_tx,
-                    *decode_audio,
-                );
+                video_reader_loop(stream, &shared, video_tx, metadata_tx);
             }
-            SocketRole::Audio { audio_tx } => {
-                audio_reader_loop(stream, &shared, audio_tx);
+            SocketRole::Audio { queue } => {
+                // A reconnected socket starts a new audio timeline; audio from
+                // before the reconnect must not be played out.
+                if is_reconnect {
+                    queue.clear();
+                }
+                audio_reader_loop(stream, &shared, queue);
             }
         }
         shared.clear_io(is_video);
@@ -989,25 +1008,17 @@ fn subscribe_socket(
     let quality = quality_from_i32(shared.quality.load(Ordering::Acquire));
     let preview = shared.preview.load(Ordering::Acquire);
     match role {
-        SocketRole::Video { decode_audio, .. } => {
+        SocketRole::Video { .. } => {
             send_subscriptions(
                 Some(&mut stream),
                 None,
                 config.frame_types,
                 quality,
                 preview,
-                *decode_audio,
             )?;
         }
         SocketRole::Audio { .. } => {
-            send_subscriptions(
-                None,
-                Some(&mut stream),
-                config.frame_types,
-                quality,
-                false,
-                false,
-            )?;
+            send_subscriptions(None, Some(&mut stream), config.frame_types, quality, false)?;
         }
     }
     Ok(())
@@ -1032,7 +1043,6 @@ fn send_subscriptions(
     frame_types: FrameType,
     quality: Quality,
     preview: bool,
-    include_audio_on_av: bool,
 ) -> Result<(), OmtError> {
     let quality_xml = suggested_quality_xml(quality);
     if let Some(stream) = av {
@@ -1044,9 +1054,6 @@ fn send_subscriptions(
             write_metadata_frame(stream, if preview { PREVIEW_ON } else { PREVIEW_OFF })?;
             write_metadata_frame(stream, SUBSCRIBE_VIDEO)?;
             write_metadata_frame(stream, &quality_xml)?;
-        }
-        if include_audio_on_av && frame_types.contains(FrameType::AUDIO) {
-            write_metadata_frame(stream, SUBSCRIBE_AUDIO)?;
         }
         stream.flush()?;
     }
@@ -1111,9 +1118,10 @@ fn record_drop_decode(stats: &Mutex<SessionStatistics>) {
     }
 }
 
-fn record_drop_audio(stats: &Mutex<SessionStatistics>) {
+fn record_drop_audio_decode(stats: &Mutex<SessionStatistics>) {
     if let Ok(mut g) = stats.lock() {
         g.frames_dropped_audio = g.frames_dropped_audio.saturating_add(1);
+        g.audio_frames_dropped_decode = g.audio_frames_dropped_decode.saturating_add(1);
     }
 }
 
@@ -1136,8 +1144,6 @@ fn video_reader_loop(
     shared: &Shared,
     video_tx: &SyncSender<WireVideo>,
     metadata_tx: &SyncSender<MetadataFrame>,
-    audio_tx: &SyncSender<DecodedAudioFrame>,
-    decode_audio_here: bool,
 ) {
     let mut channel = Channel::new(FrameType::VIDEO | FrameType::AUDIO | FrameType::METADATA);
     let mut pool = BufferPool::video();
@@ -1152,15 +1158,7 @@ fn video_reader_loop(
             Ok(Some(frame)) => {
                 let nbytes = frame.header.data_length.max(0) as usize + 16;
                 record_bytes(&shared.stats, nbytes);
-                dispatch_av_frame(
-                    frame,
-                    video_tx,
-                    metadata_tx,
-                    audio_tx,
-                    shared,
-                    decode_audio_here,
-                    &mut pool,
-                );
+                dispatch_av_frame(frame, video_tx, metadata_tx, shared);
             }
             Ok(None) => break,
             Err(OmtError::Io(ref e))
@@ -1182,11 +1180,7 @@ fn video_reader_loop(
     pool.give(read_buf);
 }
 
-fn audio_reader_loop(
-    mut stream: TcpStream,
-    shared: &Shared,
-    audio_tx: &SyncSender<DecodedAudioFrame>,
-) {
+fn audio_reader_loop(mut stream: TcpStream, shared: &Shared, queue: &AudioQueue) {
     let mut channel = Channel::new(FrameType::AUDIO);
     let mut pool = BufferPool::audio();
     let mut read_buf = pool.take(crate::types::NETWORK_RECEIVE_MAX_TRANSFER);
@@ -1201,13 +1195,9 @@ fn audio_reader_loop(
                 let nbytes = frame.header.data_length.max(0) as usize + 16;
                 record_bytes(&shared.stats, nbytes);
                 if let Some(decoded) = decode_audio_frame(frame, &mut pcm_scratch) {
-                    match audio_tx.try_send(decoded) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => record_drop_audio(&shared.stats),
-                        Err(TrySendError::Disconnected(_)) => break,
-                    }
+                    queue.push(decoded);
                 } else {
-                    record_drop_audio(&shared.stats);
+                    record_drop_audio_decode(&shared.stats);
                 }
             }
             Ok(None) => break,
@@ -1230,10 +1220,7 @@ fn dispatch_av_frame(
     frame: AssembledFrame,
     video_tx: &SyncSender<WireVideo>,
     metadata_tx: &SyncSender<MetadataFrame>,
-    audio_tx: &SyncSender<DecodedAudioFrame>,
     shared: &Shared,
-    decode_audio_here: bool,
-    pool: &mut BufferPool,
 ) {
     let meta = if frame.metadata.is_empty() {
         None
@@ -1285,21 +1272,6 @@ fn dispatch_av_frame(
             }
             Err(TrySendError::Disconnected(_)) => {}
         }
-        return;
-    }
-
-    if frame.header.frame_type.contains(FrameType::AUDIO) && decode_audio_here {
-        let mut scratch = pool.take_audio();
-        if let Some(decoded) = decode_audio_frame(frame, &mut scratch) {
-            match audio_tx.try_send(decoded) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => record_drop_audio(&shared.stats),
-                Err(TrySendError::Disconnected(_)) => {}
-            }
-        } else {
-            record_drop_audio(&shared.stats);
-        }
-        pool.give(scratch);
         return;
     }
 

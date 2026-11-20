@@ -47,6 +47,52 @@ GPU encode is `Sender::send_video_texture`. Opaque frames skip the alpha plane
 FDCT of frame N with entropy coding / send of frame N-1 (one frame of latency;
 call `flush_gpu_encode` after the last texture).
 
+## Audio buffering and latency
+
+The receiver decodes FPA1 audio on a dedicated thread and publishes it through a
+bounded queue. The queue is limited by **time, not frame count**: OMT senders
+choose `samples_per_channel` themselves (10 ms in eiviz, one video frame ≈ 17 ms
+in the official example), so "64 frames" means anything from 64 ms to over a
+second.
+
+`ReceiverConfig::audio_max_latency` (default **100 ms**, clamped to 1 ms … 2 s)
+caps both:
+
+- the total media duration queued (playback backlog), and
+- the wall-clock age of the oldest queued frame.
+
+Older frames are dropped first. This is an upper bound on the latency the
+receiver adds, not a fixed delay: a queue that is drained at playback rate sits
+at zero.
+
+```rust
+let config = ReceiverConfig {
+    frame_types: FrameType::AUDIO,
+    audio_max_latency: Duration::from_millis(250), // slow TV / big jitter
+    ..ReceiverConfig::default()
+};
+let session = ReceiverSession::connect(url, config)?;
+
+// Drain from a playback thread. Stale frames are discarded by the queue.
+while let Some(audio) = session.recv_audio_timeout(Duration::from_millis(20)) {
+    // push to the audio device
+}
+```
+
+Guidance:
+
+- Low-latency monitoring: 40–80 ms.
+- TVs / slow decoders / heavy scheduling jitter: 200–250 ms.
+- `statistics()` exposes `audio_queue_depth`, `audio_latency_us` (queued media
+  time), `audio_oldest_us`, `audio_latency_us_peak`,
+  `audio_frames_dropped_stale` and `audio_frames_dropped_decode`;
+  `frames_dropped_audio` stays the sum of the two drop counters.
+- The sender has a separate `SenderConfig::send_queue_depth` (default 4 frames
+  ≈ 40–67 ms). It is not part of the receiver budget.
+- The official libomtnet has no receive-side audio bound; it hands frames to the
+  app's `Receive()` loop. This crate decodes on its own thread, so it enforces
+  the budget above instead.
+
 ## MSRV
 
 **Rust 1.97** (`edition = "2024"`).
@@ -54,7 +100,7 @@ call `flush_gpu_encode` after the last texture).
 ## Install
 
 ```toml
-openmediatransport = "0.1"
+openmediatransport = "0.3"
 ```
 
 ## Quick start

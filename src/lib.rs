@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+mod audio_queue;
 mod clock;
 /// Media codecs (FPA1, etc.).
 pub mod codec;

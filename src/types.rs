@@ -461,8 +461,23 @@ pub struct SessionStatistics {
     pub frames_dropped_wire: u64,
     /// Video frames dropped at decode failure or latest-wins overwrite.
     pub frames_dropped_decode: u64,
-    /// Audio frames dropped or rejected.
+    /// Audio frames dropped or rejected: decode failures plus stale queue
+    /// drops (`audio_frames_dropped_decode` + `audio_frames_dropped_stale`).
     pub frames_dropped_audio: u64,
+    /// Current decoded-audio queue depth in frames.
+    pub audio_queue_depth: u32,
+    /// Media duration buffered in the audio queue (microseconds). This is the
+    /// extra playback latency the receiver queue adds when it is drained.
+    pub audio_latency_us: u64,
+    /// Wall-clock age of the oldest queued audio frame (microseconds).
+    pub audio_oldest_us: u64,
+    /// Peak [`Self::audio_latency_us`] observed.
+    pub audio_latency_us_peak: u64,
+    /// Audio frames dropped because they exceeded the latency budget or the
+    /// internal memory guard.
+    pub audio_frames_dropped_stale: u64,
+    /// Audio frames dropped because FPA1 decoding failed.
+    pub audio_frames_dropped_decode: u64,
     /// Accumulated VMX decode time in nanoseconds.
     pub codec_time_ns: u64,
     /// Peak single-frame decode time in nanoseconds.

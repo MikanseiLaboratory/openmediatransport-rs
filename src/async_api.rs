@@ -192,12 +192,29 @@ impl AsyncReceiver {
         extra_addresses: &[String],
         frame_types: FrameType,
     ) -> Result<Self, OmtError> {
-        let address = address.into();
-        let extra_addresses = extra_addresses.to_vec();
         let config = ReceiverConfig {
             frame_types,
             ..ReceiverConfig::default()
         };
+        Self::connect_with_addresses_and_config(address, extra_addresses, config).await
+    }
+
+    /// Connect with a full [`ReceiverConfig`] (audio buffering, preview, GPU…).
+    pub async fn connect_with_config(
+        address: impl Into<String>,
+        config: ReceiverConfig,
+    ) -> Result<Self, OmtError> {
+        Self::connect_with_addresses_and_config(address, &[], config).await
+    }
+
+    /// Connect using a URL plus discovery-time IP candidates and a full config.
+    pub async fn connect_with_addresses_and_config(
+        address: impl Into<String>,
+        extra_addresses: &[String],
+        config: ReceiverConfig,
+    ) -> Result<Self, OmtError> {
+        let address = address.into();
+        let extra_addresses = extra_addresses.to_vec();
         let inner = tokio::task::spawn_blocking(move || {
             ReceiverSession::connect_with_addresses(address, &extra_addresses, config)
         })
@@ -256,8 +273,30 @@ impl AsyncReceiver {
     }
 
     /// Non-blocking audio poll.
+    ///
+    /// Frames older than [`ReceiverConfig::audio_max_latency`] are discarded
+    /// first, so this can return `None` even when frames were queued.
     pub fn try_recv_audio(&self) -> Option<DecodedAudioFrame> {
         self.inner.try_recv_audio()
+    }
+
+    /// Wait up to `timeout_ms` for the next decoded audio frame.
+    pub async fn recv_audio(&mut self, timeout_ms: i32) -> Option<DecodedAudioFrame> {
+        let timeout = if timeout_ms < 0 {
+            Duration::from_secs(3600)
+        } else {
+            Duration::from_millis(timeout_ms as u64)
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(frame) = self.inner.try_recv_audio() {
+                return Some(frame);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 
     /// Non-blocking metadata poll.
