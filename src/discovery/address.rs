@@ -276,11 +276,50 @@ fn escape_xml(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Upper-case machine name used in `MACHINE (Name)` instance names.
+///
+/// libomtnet reads `Environment.MachineName`, which is `COMPUTERNAME` on
+/// Windows and `gethostname(2)` elsewhere. The `HOSTNAME` environment
+/// variable is a shell convenience only: GUI-launched processes on macOS
+/// (Finder/launchd) do not inherit it, so relying on it advertised
+/// `LOCALHOST (Name)` (issue #52).
 fn hostname() -> String {
-    env::var("COMPUTERNAME")
-        .or_else(|_| env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "localhost".into())
+    normalize_hostname(
+        os_hostname()
+            .or_else(|| env::var("HOSTNAME").ok())
+            .or_else(|| env::var("COMPUTERNAME").ok()),
+    )
+}
+
+fn normalize_hostname(raw: Option<String>) -> String {
+    raw.map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".into())
         .to_ascii_uppercase()
+}
+
+#[cfg(windows)]
+fn os_hostname() -> Option<String> {
+    // Matches `Environment.MachineName` on Windows.
+    env::var("COMPUTERNAME").ok()
+}
+
+#[cfg(unix)]
+fn os_hostname() -> Option<String> {
+    // Matches `Environment.MachineName` on Unix (`gethostname`).
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is valid for `buf.len()` writes and `gethostname` writes at
+    // most that many bytes, NUL-terminating the name on success.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Some(String::from_utf8_lossy(&buf[..len]).into_owned())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_hostname() -> Option<String> {
+    None
 }
 
 fn local_ips() -> Vec<String> {
@@ -343,5 +382,33 @@ mod tests {
         assert_eq!(a.instance_name(), "HOST (Cam)");
         assert_eq!(a.port, 6400);
         assert_eq!(a.addresses, vec!["10.0.0.1"]);
+    }
+
+    #[test]
+    fn hostname_is_normalized() {
+        assert_eq!(
+            normalize_hostname(Some(" MacBook-Air.local ".into())),
+            "MACBOOK-AIR.LOCAL"
+        );
+        assert_eq!(normalize_hostname(Some("   ".into())), "LOCALHOST");
+        assert_eq!(normalize_hostname(None), "LOCALHOST");
+    }
+
+    #[test]
+    fn os_hostname_resolves_on_supported_platforms() {
+        // Issue #52: macOS must report the real machine name instead of
+        // falling back to `LOCALHOST` when `HOSTNAME` is not exported.
+        #[cfg(any(unix, windows))]
+        {
+            let name = os_hostname().expect("platform machine name");
+            assert!(!name.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn local_address_uses_machine_name() {
+        let a = OmtAddress::local("Camera", 6400).unwrap();
+        assert!(!a.machine_name.is_empty());
+        assert!(a.instance_name().ends_with("(Camera)"));
     }
 }
