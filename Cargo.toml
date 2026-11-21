@@ -27,6 +27,7 @@ bytes = "1"
 tracing = "0.1"
 socket2 = "0.6"
 mdns-sd = "0.20"
+if-addrs = "0.15"
 roxmltree = "0.21"
 vmx = "0.2.3"
 wgpu = { version = "30.0.0", optional = true, default-features = true }

@@ -661,6 +661,7 @@ name = "openmediatransport"
 version = "0.3.0"
 dependencies = [
  "bytes",
+ "if-addrs",
  "image",
  "libc",
  "mdns-sd",
