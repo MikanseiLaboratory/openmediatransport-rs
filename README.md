@@ -29,7 +29,6 @@ Pure Rust implementation of **Open Media Transport (OMT)** — video, audio, and
 | *(default)* | Sync `Sender` / `ReceiverSession` / `Discovery` (VMX1 BGRA receive, optional 1/8 Preview) |
 | `tokio` | Async wrappers (`AsyncSender` / `AsyncReceiver` over `ReceiverSession`) |
 | `wgpu` | GPU texture receive/send on a caller-owned `wgpu::Device` (`GpuVideoContext`, `try_recv_video_gpu`, `send_video_texture`). 8-bit `Bgra8Unorm`. |
-
 Codec SIMD / rayon details: [`vmx-rs` README](https://github.com/MikanseiLaboratory/vmx-rs).
 Callers can inspect the selected VMX path via `vmx::Codec::simd_path()`
 (`avx2` / `sse128` / `neon` / `scalar`) and host capabilities via
@@ -39,7 +38,16 @@ When `wgpu` is enabled, pass `Arc<wgpu::Device>` + `Arc<wgpu::Queue>` in
 `ReceiverConfig.gpu` at connect. The decode thread submits compute and returns;
 later submits on the same queue can sample the texture. CPU readback still
 waits in `vmx::gpu::read_texture_bgra`. Receive with `try_recv_video_gpu`; send
-with `Sender::send_video_texture`.
+with `Sender::send_video_texture` (or `send_video_texture_view` when the host
+already owns a `wgpu::TextureView`, which skips the per-frame view allocation).
+
+`ReceiverConfig.gpu_decode_mode` picks the VMX coefficient path: `GpuDecodeMode::Fast`
+(default) drops high-frequency coefficients and clamps AC to `i8`, while
+`GpuDecodeMode::Exact` uploads 132-byte records and is **byte-identical** to the
+CPU decoder. Use `Exact` when decoded pixels are recorded, compared, or
+re-encoded. `ReceiverSession::gpu_stats()` reports the last decode timings and
+`gpu_path_recommended(adapter)` says whether the GPU path is expected to beat
+the CPU one on that adapter (integrated GPUs usually are not).
 
 `Sender::send_video` uses the slice-fused CPU encoder (same structure as libvmx).
 GPU encode is `Sender::send_video_texture`. Opaque frames skip the alpha plane

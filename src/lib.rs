@@ -31,7 +31,10 @@ pub mod async_api;
 mod gpu;
 
 #[cfg(feature = "wgpu")]
-pub use gpu::{DecodedVideoGpuFrame, GpuVideoContext, VideoTextureMeta};
+pub use gpu::{
+    DecodedVideoGpuFrame, GpuDecodeMode, GpuStats, GpuVideoContext, VideoTextureMeta,
+    gpu_path_recommended,
+};
 
 pub use color::{bgra_alpha_mask, bgra_to_rgba, bgra_to_rgba_into, uyvy_to_rgba};
 pub use discovery::{

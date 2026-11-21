@@ -3,10 +3,35 @@
 //! Callers pass the `Device` / `Queue` they already own. Decode submits on
 //! that queue and returns; later submits on the same queue can sample the
 //! texture. CPU readback still waits in [`vmx::gpu::read_texture_bgra`].
+//!
+//! Decode has two coefficient paths ([`GpuDecodeMode`]): [`GpuDecodeMode::Fast`]
+//! (default) drops high-frequency coefficients and clamps AC to `i8`, while
+//! [`GpuDecodeMode::Exact`] is byte-identical to the CPU decoder. Pick the
+//! exact path with [`crate::ReceiverConfig::gpu_decode_mode`] when the decoded
+//! pixels are compared, recorded, or re-encoded downstream.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::types::{ColorSpace, VideoFlags};
+
+/// Coefficient/IDCT path for VMX texture decode.
+///
+/// Re-export of [`vmx::gpu::GpuDecodeMode`]; set it on
+/// [`crate::ReceiverConfig::gpu_decode_mode`].
+pub use vmx::gpu::GpuDecodeMode;
+/// Timings from the receiver's most recent GPU decode/encode.
+///
+/// Re-export of [`vmx::gpu::GpuStats`]; read it from
+/// [`crate::ReceiverSession::gpu_stats`].
+pub use vmx::gpu::GpuStats;
+
+/// Whether the wgpu path is expected to beat the CPU path on `adapter`.
+///
+/// Thin re-export of [`vmx::gpu::gpu_path_recommended`] so a host can decide
+/// whether to build a [`GpuVideoContext`] before connecting.
+pub fn gpu_path_recommended(adapter: &wgpu::Adapter) -> bool {
+    vmx::gpu::gpu_path_recommended(adapter)
+}
 
 /// Host GPU objects used for VMX texture decode / encode.
 ///
