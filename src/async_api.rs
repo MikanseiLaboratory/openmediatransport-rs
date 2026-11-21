@@ -94,6 +94,21 @@ impl AsyncSender {
         tokio::task::block_in_place(|| self.inner.send_video_texture(ctx, texture, meta))
     }
 
+    /// Encode a GPU texture from a caller-owned view and send.
+    ///
+    /// Reuses `view` instead of allocating one per frame; see
+    /// [`crate::Sender::send_video_texture_view`].
+    #[cfg(feature = "wgpu")]
+    pub async fn send_video_texture_view(
+        &mut self,
+        ctx: &crate::GpuVideoContext,
+        texture: &wgpu::Texture,
+        view: &wgpu::TextureView,
+        meta: crate::VideoTextureMeta,
+    ) -> Result<(), OmtError> {
+        tokio::task::block_in_place(|| self.inner.send_video_texture_view(ctx, texture, view, meta))
+    }
+
     /// Send an audio frame asynchronously.
     pub async fn send_audio(&mut self, frame: MediaFrame) -> Result<(), OmtError> {
         tokio::task::block_in_place(|| self.inner.send_audio(frame))

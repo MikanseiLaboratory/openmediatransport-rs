@@ -628,4 +628,182 @@ mod gpu {
         session.disconnect();
         cpu_rx.disconnect();
     }
+
+    #[test]
+    fn gpu_send_texture_view_matches_texture_path() {
+        let _gpu = GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((ctx, device, queue)) = headless_ctx() else {
+            eprintln!("skip: no wgpu adapter");
+            return;
+        };
+
+        let mut sender = Sender::create("GpuViewSrc", FrameType::VIDEO).expect("sender");
+        let url = format!("omt://127.0.0.1:{}", sender.port());
+        let session = ReceiverSession::connect(
+            &url,
+            ReceiverConfig {
+                frame_types: FrameType::VIDEO,
+                connect_timeout: Duration::from_secs(2),
+                ..ReceiverConfig::default()
+            },
+        )
+        .expect("rx");
+        wait_video_sub(&mut sender);
+
+        let width = 32i32;
+        let height = 32i32;
+        let bgra = sample_bgra(width, height);
+        let tex = gpu::upload_bgra_texture(&device, &queue, width as u32, height as u32, &bgra);
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let meta = |timestamp| VideoTextureMeta {
+            width: width as u32,
+            height: height as u32,
+            timestamp,
+            frame_rate_n: 60,
+            frame_rate_d: 1,
+            ..Default::default()
+        };
+
+        sender
+            .send_video_texture(&ctx, &tex, meta(50_000_000))
+            .expect("send texture");
+        let mut first = None;
+        for _ in 0..300 {
+            if let Some(f) = session.try_recv_video()
+                && f.timestamp == 50_000_000
+            {
+                first = Some(f);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let first = first.expect("recv after texture encode");
+
+        sender
+            .send_video_texture_view(&ctx, &tex, &view, meta(60_000_000))
+            .expect("send texture view");
+        let mut second = None;
+        for _ in 0..300 {
+            if let Some(f) = session.try_recv_video()
+                && f.timestamp == 60_000_000
+            {
+                second = Some(f);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let second = second.expect("recv after texture-view encode");
+
+        // Two adjacent frames come from two different rate-control states, so the
+        // pixels differ slightly even when both encode paths are correct.
+        assert_psnr(
+            first.pixels.as_ref(),
+            second.pixels.as_ref(),
+            30.0,
+            "texture view vs texture send",
+        );
+        session.disconnect();
+    }
+
+    #[test]
+    fn gpu_exact_receive_matches_cpu_bytes() {
+        let _gpu = GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((ctx, device, queue)) = headless_ctx() else {
+            eprintln!("skip: no wgpu adapter");
+            return;
+        };
+
+        let mut sender = Sender::create("GpuExactSrc", FrameType::VIDEO).expect("sender");
+        let url = format!("omt://127.0.0.1:{}", sender.port());
+        let cpu = ReceiverSession::connect(
+            &url,
+            ReceiverConfig {
+                frame_types: FrameType::VIDEO,
+                connect_timeout: Duration::from_secs(2),
+                ..ReceiverConfig::default()
+            },
+        )
+        .expect("cpu rx");
+        let gpu_rx = ReceiverSession::connect(
+            &url,
+            ReceiverConfig {
+                frame_types: FrameType::VIDEO,
+                connect_timeout: Duration::from_secs(2),
+                gpu: Some(ctx),
+                gpu_decode_mode: openmediatransport::GpuDecodeMode::Exact,
+                ..ReceiverConfig::default()
+            },
+        )
+        .expect("gpu rx");
+        wait_video_sub(&mut sender);
+
+        let width = 128i32;
+        let height = 72i32;
+        let stride = (width as usize) * 4;
+        let bgra = sample_bgra(width, height);
+        sender
+            .send_video(MediaFrame {
+                frame_type: FrameType::VIDEO,
+                timestamp: 70_000_000,
+                codec: openmediatransport::Codec::Bgra as i32,
+                width,
+                height,
+                stride: stride as i32,
+                frame_rate_n: 60,
+                frame_rate_d: 1,
+                data: bgra,
+                ..Default::default()
+            })
+            .expect("send");
+
+        let mut cpu_got = None;
+        let mut gpu_got = None;
+        for _ in 0..300 {
+            if cpu_got.is_none()
+                && let Some(f) = cpu.try_recv_video()
+                && f.timestamp == 70_000_000
+            {
+                cpu_got = Some(f);
+            }
+            if gpu_got.is_none()
+                && let Some(f) = gpu_rx.try_recv_video_gpu()
+                && f.timestamp == 70_000_000
+            {
+                gpu_got = Some(f);
+            }
+            if cpu_got.is_some() && gpu_got.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let cpu_frame =
+            cpu_got.unwrap_or_else(|| panic!("cpu decoded; last_error={:?}", cpu.last_error()));
+        let gpu_frame = gpu_got.unwrap_or_else(|| {
+            panic!(
+                "gpu decoded; last_error={:?} stats={:?}",
+                gpu_rx.last_error(),
+                gpu_rx.statistics()
+            )
+        });
+
+        let gpu_pixels = gpu::read_texture_bgra(
+            &device,
+            &queue,
+            &gpu_frame.texture,
+            gpu_frame.width,
+            gpu_frame.height,
+        )
+        .expect("readback");
+        assert_eq!(
+            gpu_pixels.as_slice(),
+            cpu_frame.pixels.as_ref(),
+            "exact GPU decode must be byte-identical to the CPU decoder"
+        );
+        assert!(
+            gpu_rx.gpu_stats().is_some(),
+            "GPU stats should be published after a decode"
+        );
+        cpu.disconnect();
+        gpu_rx.disconnect();
+    }
 }

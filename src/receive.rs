@@ -27,7 +27,7 @@ use crate::types::{
 };
 
 #[cfg(feature = "wgpu")]
-use crate::gpu::{DecodedVideoGpuFrame, GpuVideoContext};
+use crate::gpu::{DecodedVideoGpuFrame, GpuDecodeMode, GpuStats, GpuVideoContext};
 
 /// Wire-compressed video queue depth (backpressure → drop).
 const VIDEO_WIRE_Q: usize = 3;
@@ -91,6 +91,14 @@ pub struct ReceiverConfig {
     /// [`vmx::gpu::read_texture_bgra`].
     #[cfg(feature = "wgpu")]
     pub gpu: Option<GpuVideoContext>,
+    /// Coefficient/IDCT path for VMX texture decode.
+    ///
+    /// Ignored unless [`Self::gpu`] is set. [`GpuDecodeMode::Fast`] drops the
+    /// high-frequency coefficients and clamps AC to `i8`; [`GpuDecodeMode::Exact`]
+    /// uploads 132-byte records and reproduces the CPU decoder byte for byte at
+    /// the cost of a larger upload. Defaults to [`GpuDecodeMode::Fast`].
+    #[cfg(feature = "wgpu")]
+    pub gpu_decode_mode: GpuDecodeMode,
 }
 
 impl Default for ReceiverConfig {
@@ -104,6 +112,8 @@ impl Default for ReceiverConfig {
             audio_max_latency: DEFAULT_MAX_LATENCY,
             #[cfg(feature = "wgpu")]
             gpu: None,
+            #[cfg(feature = "wgpu")]
+            gpu_decode_mode: GpuDecodeMode::Fast,
         }
     }
 }
@@ -334,6 +344,10 @@ struct Shared {
     gpu: Option<GpuVideoContext>,
     #[cfg(feature = "wgpu")]
     gpu_video: DecodedGpuQueue,
+    #[cfg(feature = "wgpu")]
+    gpu_decode_mode: GpuDecodeMode,
+    #[cfg(feature = "wgpu")]
+    gpu_stats: Mutex<Option<GpuStats>>,
     wire_depth: AtomicU32,
     outbound_meta: Mutex<Vec<String>>,
     /// Live preview request; reconnects re-read this instead of the connect-time config.
@@ -494,6 +508,10 @@ impl ReceiverSession {
             gpu: config.gpu.clone(),
             #[cfg(feature = "wgpu")]
             gpu_video: DecodedGpuQueue::new(VIDEO_DECODED_Q),
+            #[cfg(feature = "wgpu")]
+            gpu_decode_mode: config.gpu_decode_mode,
+            #[cfg(feature = "wgpu")]
+            gpu_stats: Mutex::new(None),
             wire_depth: AtomicU32::new(0),
             outbound_meta: Mutex::new(Vec::new()),
             preview: AtomicBool::new(config.preview),
@@ -647,6 +665,13 @@ impl ReceiverSession {
     #[cfg(feature = "wgpu")]
     pub fn recv_video_gpu_timeout(&self, timeout: Duration) -> Option<DecodedVideoGpuFrame> {
         self.shared.gpu_video.wait_take(timeout, &self.shared.stop)
+    }
+
+    /// Timings from the most recent GPU decode on the [`ReceiverConfig::gpu`]
+    /// queue (`None` before the first frame or when the GPU path is off).
+    #[cfg(feature = "wgpu")]
+    pub fn gpu_stats(&self) -> Option<GpuStats> {
+        self.shared.gpu_stats.lock().ok().and_then(|g| *g)
     }
 
     /// Non-blocking poll for decoded audio.
@@ -1475,10 +1500,16 @@ fn video_decode_loop_gpu(
             payload.as_slice(),
             &mut codec,
             &ctx,
+            shared.gpu_decode_mode,
         ) {
             Ok(frame) => {
                 let ns = t0.elapsed().as_nanos() as u64;
                 record_codec_time(&shared.stats, ns, age_us);
+                if let Some(stats) = codec.as_ref().and_then(|c| c.gpu_stats())
+                    && let Ok(mut slot) = shared.gpu_stats.lock()
+                {
+                    *slot = Some(stats);
+                }
                 shared.gpu_video.publish(frame, &shared.stats);
             }
             Err(e) => {
@@ -1504,6 +1535,7 @@ fn decode_vmx_texture(
     payload: &[u8],
     cached: &mut Option<vmx::Codec>,
     ctx: &GpuVideoContext,
+    mode: GpuDecodeMode,
 ) -> Result<DecodedVideoGpuFrame, OmtError> {
     if width < vmx::MIN_WIDTH || height < vmx::MIN_HEIGHT {
         return Err(OmtError::Codec("VMX dimensions below minimum".into()));
@@ -1531,7 +1563,7 @@ fn decode_vmx_texture(
         let gpu = if preview {
             codec.decode_preview_to_texture(&ctx.device, &ctx.queue)?
         } else {
-            codec.decode_to_texture(&ctx.device, &ctx.queue)?
+            codec.decode_to_texture_with_mode(&ctx.device, &ctx.queue, mode)?
         };
         Ok::<_, OmtError>(DecodedVideoGpuFrame {
             width: gpu.width,

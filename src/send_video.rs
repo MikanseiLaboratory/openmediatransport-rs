@@ -173,6 +173,57 @@ impl VideoEncoder {
         Ok(())
     }
 
+    /// Encode from a caller-owned texture view to a VMX1 bitstream
+    /// (`feature = "wgpu"`).
+    ///
+    /// Same as [`Self::encode_from_texture`], but reuses the view the host
+    /// already created instead of allocating one per frame.
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn encode_from_texture_view(
+        &mut self,
+        ctx: &crate::GpuVideoContext,
+        texture: &wgpu::Texture,
+        view: &wgpu::TextureView,
+        meta: &crate::VideoTextureMeta,
+        quality: Quality,
+    ) -> Result<(Vec<u8>, Duration), OmtError> {
+        let profile = vmx_profile(quality);
+        let cs = map_color_space(meta.color_space);
+        {
+            let _gpu_guard = ctx.lock_gpu();
+            self.ensure_codec(meta.width as i32, meta.height as i32, profile, cs)?;
+        }
+        let include_alpha = meta.flags.contains(VideoFlags::ALPHA);
+        let vmx = self.codec.as_mut().expect("codec after ensure");
+        let t0 = Instant::now();
+        vmx.encode_from_texture_view(&ctx.device, &ctx.queue, texture, view, include_alpha)?;
+        let bitstream = self.save_bitstream()?;
+        Ok((bitstream, t0.elapsed()))
+    }
+
+    /// Submit a caller-owned texture view without waiting for readback
+    /// (`feature = "wgpu"`).
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn submit_from_texture_view(
+        &mut self,
+        ctx: &crate::GpuVideoContext,
+        texture: &wgpu::Texture,
+        view: &wgpu::TextureView,
+        meta: &crate::VideoTextureMeta,
+        quality: Quality,
+    ) -> Result<(), OmtError> {
+        let profile = vmx_profile(quality);
+        let cs = map_color_space(meta.color_space);
+        {
+            let _gpu_guard = ctx.lock_gpu();
+            self.ensure_codec(meta.width as i32, meta.height as i32, profile, cs)?;
+        }
+        let include_alpha = meta.flags.contains(VideoFlags::ALPHA);
+        let vmx = self.codec.as_mut().expect("codec after ensure");
+        vmx.encode_from_texture_view_submit(&ctx.device, &ctx.queue, texture, view, include_alpha)?;
+        Ok(())
+    }
+
     /// Finish a previous [`Self::submit_from_texture`].
     #[cfg(feature = "wgpu")]
     pub(crate) fn finish_submitted_texture(

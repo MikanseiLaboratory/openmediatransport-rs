@@ -606,19 +606,7 @@ impl Sender {
         if !self.subscribed.video {
             return Ok(());
         }
-        let size = texture.size();
-        if size.width != meta.width || size.height != meta.height {
-            return Err(OmtError::InvalidArgument(format!(
-                "texture size {}x{} != meta {}x{}",
-                size.width, size.height, meta.width, meta.height
-            )));
-        }
-        if meta.width < 16 || meta.height < 16 {
-            return Err(OmtError::InvalidArgument(format!(
-                "video frame too small: {}x{}",
-                meta.width, meta.height
-            )));
-        }
+        Self::validate_texture_meta(texture, &meta)?;
         let quality = self.effective_quality();
         if self.gpu_pipeline {
             self.finish_pending_gpu(ctx)?;
@@ -632,6 +620,62 @@ impl Sender {
             .encode_from_texture(ctx, texture, &meta, quality)?;
         self.stats.record_codec(elapsed);
         self.send_encoded_texture(meta, bitstream)
+    }
+
+    /// Encode a `Bgra8Unorm` (or `Rgba8Unorm`) texture from a caller-owned view
+    /// and send VMX1.
+    ///
+    /// Identical to [`Self::send_video_texture`] except that it reuses `view`
+    /// instead of allocating a view per frame. `texture` must be the texture
+    /// `view` was created from, and it must be sampleable
+    /// (`TEXTURE_BINDING`).
+    #[cfg(feature = "wgpu")]
+    pub fn send_video_texture_view(
+        &mut self,
+        ctx: &crate::gpu::GpuVideoContext,
+        texture: &wgpu::Texture,
+        view: &wgpu::TextureView,
+        meta: crate::gpu::VideoTextureMeta,
+    ) -> Result<(), OmtError> {
+        if !self.subscribed.video {
+            return Ok(());
+        }
+        Self::validate_texture_meta(texture, &meta)?;
+        let quality = self.effective_quality();
+        if self.gpu_pipeline {
+            self.finish_pending_gpu(ctx)?;
+            self.video_encoder
+                .submit_from_texture_view(ctx, texture, view, &meta, quality)?;
+            self.pending_gpu = Some(meta);
+            return Ok(());
+        }
+        let (bitstream, elapsed) = self
+            .video_encoder
+            .encode_from_texture_view(ctx, texture, view, &meta, quality)?;
+        self.stats.record_codec(elapsed);
+        self.send_encoded_texture(meta, bitstream)
+    }
+
+    /// Check that `meta` describes `texture`.
+    #[cfg(feature = "wgpu")]
+    fn validate_texture_meta(
+        texture: &wgpu::Texture,
+        meta: &crate::gpu::VideoTextureMeta,
+    ) -> Result<(), OmtError> {
+        let size = texture.size();
+        if size.width != meta.width || size.height != meta.height {
+            return Err(OmtError::InvalidArgument(format!(
+                "texture size {}x{} != meta {}x{}",
+                size.width, size.height, meta.width, meta.height
+            )));
+        }
+        if meta.width < 16 || meta.height < 16 {
+            return Err(OmtError::InvalidArgument(format!(
+                "video frame too small: {}x{}",
+                meta.width, meta.height
+            )));
+        }
+        Ok(())
     }
 
     #[cfg(feature = "wgpu")]
