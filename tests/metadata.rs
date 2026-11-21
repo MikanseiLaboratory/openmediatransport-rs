@@ -4,7 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openmediatransport::protocol::metadata::{
-    SUBSCRIBE_VIDEO, TALLY_NONE, TALLY_PREVIEW, TALLY_PREVIEW_PROGRAM, TALLY_PROGRAM,
+    SUBSCRIBE_VIDEO, TALLY_NONE, TALLY_NONE_LEGACY, TALLY_PREVIEW, TALLY_PREVIEW_LEGACY,
+    TALLY_PREVIEW_PROGRAM, TALLY_PREVIEW_PROGRAM_LEGACY, TALLY_PROGRAM, TALLY_PROGRAM_LEGACY,
     decode_metadata_xml, encode_metadata_xml, parse_metadata, tally_xml,
 };
 use openmediatransport::types::Tally;
@@ -35,13 +36,20 @@ fn metadata_without_nul_still_decodes() {
 }
 
 #[test]
-fn tally_program_double_equals_quirk() {
-    assert!(TALLY_PREVIEW.contains(r#"Program=="false""#));
-    assert!(TALLY_PROGRAM.contains(r#"Program=="true""#));
-    assert!(TALLY_PREVIEW_PROGRAM.contains(r#"Program=="true""#));
-    assert!(TALLY_NONE.contains(r#"Program=="false""#));
-    // Must NOT use single-equals Program=
-    assert!(!TALLY_PREVIEW.contains(r#"Program="false""#));
+fn tally_xml_is_well_formed() {
+    assert!(TALLY_PREVIEW.contains(r#"Program="false""#));
+    assert!(TALLY_PROGRAM.contains(r#"Program="true""#));
+    assert!(TALLY_PREVIEW_PROGRAM.contains(r#"Program="true""#));
+    assert!(TALLY_NONE.contains(r#"Program="false""#));
+    assert!(!TALLY_PREVIEW.contains(r#"Program=="#));
+}
+
+#[test]
+fn tally_legacy_xml_keeps_double_equals() {
+    assert!(TALLY_PREVIEW_LEGACY.contains(r#"Program=="false""#));
+    assert!(TALLY_PROGRAM_LEGACY.contains(r#"Program=="true""#));
+    assert!(TALLY_PREVIEW_PROGRAM_LEGACY.contains(r#"Program=="true""#));
+    assert!(TALLY_NONE_LEGACY.contains(r#"Program=="false""#));
 }
 
 #[test]
@@ -54,6 +62,12 @@ fn tally_xml_mapping() {
 
 #[test]
 fn parse_metadata_reads_attribute_keys() {
+    let items = parse_metadata(r#"<OMTTally Preview="true" Program="true" />"#);
+    assert_eq!(items, vec![Metadata::Tally(Tally::new(1, 1))]);
+}
+
+#[test]
+fn parse_metadata_reads_legacy_program_double_equals() {
     let items = parse_metadata(r#"<OMTTally Preview="true" Program=="true" />"#);
     assert_eq!(items, vec![Metadata::Tally(Tally::new(1, 1))]);
 }
