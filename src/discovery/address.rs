@@ -1,6 +1,7 @@
 //! OMT address / URL helpers.
 
 use std::env;
+use std::net::IpAddr;
 
 use crate::error::OmtError;
 use crate::types::{MAX_INSTANCE_NAME_LENGTH, URL_PREFIX};
@@ -317,11 +318,43 @@ fn hostname() -> String {
     )
 }
 
+/// Normalize a machine label, replacing names that do not identify a host.
+///
+/// `localhost` (and `*.localhost`) and bare IP literals are not identities:
+/// they resolve to this machine, or to the receiving machine, rather than to
+/// the sender. A receiver that resolves the label (URL-only connect) would
+/// reach its own loopback, and every affected machine shares one DNS-SD
+/// identity. Such names are replaced with `OMT-HOST-<primary IPv4>` (or
+/// `OMT-HOST`).
 fn normalize_hostname(raw: Option<String>) -> String {
-    raw.map(|s| s.trim().to_string())
+    let normalized = raw
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "localhost".into())
-        .to_ascii_uppercase()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if normalized.is_empty() || is_reserved_machine_name(&normalized) {
+        return fallback_machine_name();
+    }
+    normalized
+}
+
+fn is_reserved_machine_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("LOCALHOST")
+        || name.to_ascii_lowercase().ends_with(".localhost")
+        || name.parse::<IpAddr>().is_ok()
+}
+
+fn fallback_machine_name() -> String {
+    local_ips()
+        .iter()
+        .find_map(|address| {
+            address
+                .parse::<std::net::Ipv4Addr>()
+                .ok()
+                .filter(|ip| !ip.is_loopback())
+        })
+        .map(|ip| format!("OMT-HOST-{}", ip.to_string().replace('.', "-")))
+        .unwrap_or_else(|| "OMT-HOST".to_string())
 }
 
 #[cfg(windows)]
@@ -348,18 +381,70 @@ fn os_hostname() -> Option<String> {
     None
 }
 
+/// Addresses this machine advertises to peers.
+///
+/// Every operational interface is listed (IPv4 first, then global/ULA IPv6),
+/// followed by `127.0.0.1` to match libomtnet's `OMTSend`, which adds
+/// `IPAddress.Loopback` to every source. Point-to-point interfaces (VPN
+/// tunnels, Tailscale) are kept, but after regular interfaces so the first
+/// connect does not wait on a tunnel the peer cannot reach.
+///
+/// `mdns-sd` announces interface addresses itself, and a compliant discovery
+/// server replaces this list with the TCP peer address, so this mainly
+/// matters to callers that consume [`OmtAddress`] directly. It also stops
+/// multi-homed hosts from advertising only their default-route address.
+///
+/// Receivers use the loopback entry only when it is the sole candidate for a
+/// source on this machine; see the receiver's endpoint policy.
 fn local_ips() -> Vec<String> {
-    let mut out = vec!["127.0.0.1".to_string()];
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
-        && socket.connect("8.8.8.8:80").is_ok()
-        && let Ok(local) = socket.local_addr()
-    {
-        let ip = local.ip().to_string();
-        if ip != "0.0.0.0" && !out.contains(&ip) {
-            out.insert(0, ip);
+    let primary = default_route_ip();
+    let mut v4: Vec<(bool, std::net::Ipv4Addr)> = Vec::new();
+    let mut v6: Vec<(bool, std::net::Ipv6Addr)> = Vec::new();
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for interface in interfaces {
+            if interface.is_loopback() || !interface.is_oper_up() {
+                continue;
+            }
+            let p2p = interface.is_p2p();
+            match interface.ip() {
+                IpAddr::V4(ip) if !ip.is_unspecified() => v4.push((p2p, ip)),
+                // Link-local IPv6 needs a zone id that OMTAddress cannot
+                // carry (the XML stores a bare address string).
+                IpAddr::V6(ip) if !ip.is_unicast_link_local() && !ip.is_unspecified() => {
+                    v6.push((p2p, ip));
+                }
+                IpAddr::V4(_) | IpAddr::V6(_) => {}
+            }
         }
     }
-    out
+    // `false < true`, so regular interfaces sort before point-to-point ones.
+    v4.sort_unstable_by_key(|(p2p, ip)| (*p2p, *ip));
+    v4.dedup();
+    v6.sort_unstable_by_key(|(p2p, ip)| (*p2p, *ip));
+    v6.dedup();
+    // Try the default-route address first when it is a regular interface;
+    // a tunnel keeps its place at the end.
+    if let Some(IpAddr::V4(primary)) = primary
+        && let Some(pos) = v4.iter().position(|(p2p, ip)| !*p2p && *ip == primary)
+    {
+        let primary = v4.remove(pos);
+        v4.insert(0, primary);
+    }
+    let mut addresses: Vec<String> = v4.into_iter().map(|(_, ip)| ip.to_string()).collect();
+    addresses.extend(v6.into_iter().map(|(_, ip)| ip.to_string()));
+    // libomtnet's `OMTSend` adds `IPAddress.Loopback` to every source. Keep
+    // that for parity; `OmtAddress::local` sorts it last among IPv4, and the
+    // receiver drops it whenever a routable endpoint exists.
+    addresses.push("127.0.0.1".to_string());
+    addresses
+}
+
+/// The address of the interface carrying the default route, if any.
+fn default_route_ip() -> Option<IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
 }
 
 #[cfg(test)]
@@ -411,19 +496,39 @@ mod tests {
     }
 
     #[test]
+    fn advertised_addresses_include_loopback() {
+        // libomtnet's `OMTSend` adds `IPAddress.Loopback` to every source.
+        let a = OmtAddress::local("Cam", 6400).unwrap();
+        assert!(
+            a.addresses.iter().any(|ip| ip == "127.0.0.1"),
+            "loopback must be advertised for parity: {:?}",
+            a.addresses
+        );
+    }
+
+    #[test]
     fn hostname_is_normalized() {
         assert_eq!(
             normalize_hostname(Some(" MacBook-Air.local ".into())),
             "MACBOOK-AIR.LOCAL"
         );
-        assert_eq!(normalize_hostname(Some("   ".into())), "LOCALHOST");
-        assert_eq!(normalize_hostname(None), "LOCALHOST");
+        for reserved in [
+            Some("   ".into()),
+            None,
+            Some("localhost".into()),
+            Some("127.0.0.1".into()),
+            Some("::1".into()),
+        ] {
+            let name = normalize_hostname(reserved);
+            assert!(name.starts_with("OMT-HOST"), "{name}");
+            assert!(!is_reserved_machine_name(&name), "{name}");
+        }
     }
 
     #[test]
     fn os_hostname_resolves_on_supported_platforms() {
         // Issue #52: macOS must report the real machine name instead of
-        // falling back to `LOCALHOST` when `HOSTNAME` is not exported.
+        // relying on `HOSTNAME`, which GUI-launched processes do not get.
         #[cfg(any(unix, windows))]
         {
             let name = os_hostname().expect("platform machine name");

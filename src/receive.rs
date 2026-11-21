@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver as MpscReceiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -899,14 +899,28 @@ fn socket_supervisor(
     }
 }
 
-/// Build TCP endpoints from URL host + discovery-time address candidates.
+/// Build TCP endpoints from discovery addresses or the URL host.
+///
+/// Discovery addresses are transport facts and, when present, are the only
+/// candidates: the URL host is a machine label (`MACHINE (Source)`), not an
+/// address, so it is not resolved for TCP. Without discovery addresses the
+/// URL host is resolved. Loopback results are dropped whenever a routable
+/// candidate exists; a loopback-only set is still attempted, matching
+/// libomtnet.
 fn resolve_endpoints(
     parsed: &OmtAddress,
     extra_addresses: &[String],
 ) -> Result<Vec<SocketAddr>, OmtError> {
     let port = parsed.port;
+    let discovery_addresses = !extra_addresses.is_empty();
+    let candidates = if discovery_addresses {
+        extra_addresses
+    } else {
+        &parsed.addresses
+    };
+
     let mut hosts: Vec<String> = Vec::new();
-    for host in extra_addresses.iter().chain(parsed.addresses.iter()) {
+    for host in candidates {
         let host = host.trim();
         if host.is_empty() {
             continue;
@@ -923,7 +937,7 @@ fn resolve_endpoints(
 
     let mut endpoints: Vec<SocketAddr> = Vec::new();
     for host in &hosts {
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if let Ok(ip) = host.parse::<IpAddr>() {
             let addr = SocketAddr::new(ip, port);
             if !endpoints.contains(&addr) {
                 endpoints.push(addr);
@@ -952,7 +966,25 @@ fn resolve_endpoints(
         )));
     }
 
-    // Prefer ordinary IPv4, then 172.*, then IPv6 / link-local / loopback.
+    // Never fall back to this machine's loopback when the selected source has
+    // a routable endpoint. Otherwise a local sender that happens to use the
+    // same port would be played as if it were the selected source (libomtnet
+    // #60). A loopback-only candidate set is still attempted, matching
+    // libomtnet: it can only reach this machine, so it is correct for a local
+    // source and fails (or reaches an unrelated local sender) otherwise.
+    if endpoints
+        .iter()
+        .any(|endpoint| !endpoint.ip().is_loopback())
+    {
+        endpoints.retain(|endpoint| !endpoint.ip().is_loopback());
+    } else {
+        tracing::warn!(
+            "receiver host '{}' has only loopback endpoints; trying them (libomtnet parity)",
+            parsed.addresses.join(", ")
+        );
+    }
+
+    // Prefer ordinary IPv4, then 172.*, then IPv6 / link-local.
     endpoints.sort_by_key(endpoint_preference);
     Ok(endpoints)
 }
@@ -1650,6 +1682,42 @@ mod tests {
         slot.publish(mk(2), &stats);
         assert_eq!(slot.try_take().unwrap().timestamp, 1);
         assert_eq!(slot.try_take().unwrap().timestamp, 2);
+    }
+
+    #[test]
+    fn discovery_addresses_are_not_combined_with_the_url_host() {
+        // The URL host is a machine label. Even when it resolves to loopback
+        // (LOCALHOST), it must not be added to discovery-provided addresses.
+        let parsed = OmtAddress::from_url("omt://LOCALHOST:6401/Cam").unwrap();
+        let endpoints = resolve_endpoints(&parsed, &["192.0.2.5".to_string()]).unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].to_string(), "192.0.2.5:6401");
+    }
+
+    #[test]
+    fn loopback_candidates_are_dropped_when_a_routable_address_exists() {
+        let parsed = OmtAddress::from_url("omt://MYMAC.LOCAL:6401/Cam").unwrap();
+        let endpoints =
+            resolve_endpoints(&parsed, &["192.0.2.5".to_string(), "127.0.0.1".to_string()])
+                .unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].to_string(), "192.0.2.5:6401");
+    }
+
+    #[test]
+    fn loopback_only_source_is_attempted_like_libomtnet() {
+        // libomtnet tries `address.Addresses` as-is, so a loopback-only entry
+        // is attempted rather than rejected. It can only reach this machine.
+        let parsed = OmtAddress::from_url("omt://REMOTE:6401/Cam").unwrap();
+        let endpoints = resolve_endpoints(&parsed, &["127.0.0.1".to_string()]).unwrap();
+        assert_eq!(endpoints[0].to_string(), "127.0.0.1:6401");
+    }
+
+    #[test]
+    fn explicit_loopback_url_is_allowed() {
+        let parsed = OmtAddress::from_url("omt://127.0.0.1:6401/Cam").unwrap();
+        let endpoints = resolve_endpoints(&parsed, &[]).unwrap();
+        assert_eq!(endpoints[0].to_string(), "127.0.0.1:6401");
     }
 
     #[test]
